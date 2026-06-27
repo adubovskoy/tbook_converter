@@ -38,6 +38,7 @@ type Config struct {
 	CacheDir      string
 	LimitChapters int
 	DryRun        bool
+	Force         bool
 	Verbose       bool
 }
 
@@ -73,6 +74,7 @@ func Load(args []string) (*Config, error) {
 	maxRetries := fs.Int("max-retries", envInt("MAX_RETRIES", 4), "per-request retry attempts")
 	limit := fs.Int("limit-chapters", 0, "only convert the first N chapters (0 = all)")
 	dryRun := fs.Bool("dry-run", false, "parse + segment only; no API calls, no output")
+	force := fs.Bool("force", false, "force re-translation, ignoring cached entries (overwrites cache)")
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
 	fs.BoolVar(&verboseSh, "v", false, "shorthand for --verbose")
 
@@ -116,6 +118,7 @@ func Load(args []string) (*Config, error) {
 		CacheDir:      *cacheDir,
 		LimitChapters: *limit,
 		DryRun:        *dryRun,
+		Force:         *force,
 		Verbose:       verbose || verboseSh,
 	}
 

@@ -44,7 +44,7 @@ func TestEndToEndOffline(t *testing.T) {
 		cache.Write(cacheDir, cache.Key(s.Src, "en", "ru", model), identityTranslation(s))
 	}
 
-	if pending := translate.CountPending(sentences, []string{"ru"}, cacheDir, "en", model); pending != 0 {
+	if pending := translate.CountPending(sentences, []string{"ru"}, cacheDir, "en", model, false); pending != 0 {
 		t.Fatalf("expected 0 pending after seeding, got %d", pending)
 	}
 	_, missing := translate.FillFromCache(sentences, []string{"ru"}, cacheDir, "en", model)

@@ -47,7 +47,8 @@ Settings precedence: **command-line flags > shell env > `.env` > defaults**.
 
 Flags: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
 `--model`, `--cache-dir` (default `.tbook_cache`), `--batch-size`,
-`--concurrency`, `--max-retries`, `--limit-chapters N`, `--dry-run`, `-v`.
+`--concurrency`, `--max-retries`, `--limit-chapters N`, `--dry-run`,
+`--force` (re-translate, ignoring cache), `-v`.
 Run `./convert --help` for the full list.
 
 The run shows a progress bar, retries transient failures (network/5xx/429 with

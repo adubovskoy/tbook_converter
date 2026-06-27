@@ -1,6 +1,7 @@
 package epub
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dimando/reader/converter/internal/segment"
@@ -12,7 +13,7 @@ func parseChapters(t *testing.T, body string) []segment.ParsedChapter {
 	t.Helper()
 	doc := `<html><body>` + body + `</body></html>`
 	var out []segment.ParsedChapter
-	cur := parseDoc([]byte(doc), nil, &out)
+	cur := parseDoc([]byte(doc), nil, &out, false)
 	if cur != nil {
 		out = append(out, *cur)
 	}
@@ -76,6 +77,47 @@ func TestRichTextNestedEmphasisUnions(t *testing.T) {
 	}
 	if !(contains(kinds, tbook.SpanItalic) && contains(kinds, tbook.SpanBold)) {
 		t.Fatalf("nested emphasis kinds over \"x\" = %v, want both i and b", kinds)
+	}
+}
+
+// TestParseGutenbergChapterDiv covers Project Gutenberg's ebookmaker layout:
+// each chapter is wrapped in <div class="chapter"> with the title in an inner
+// heading, and a trailing pg-boilerplate footer carries the license. The title
+// comes from the first heading (the redundant chapter-number heading is dropped),
+// body prose is kept, and the boilerplate heading must not leak into the chapter.
+func TestParseGutenbergChapterDiv(t *testing.T) {
+	body := `
+    <div class="chapter">
+      <h2><a id="chap01"/>I.<br/>
+A SCANDAL IN BOHEMIA</h2>
+      <h3>I.</h3>
+      <p class="pfirst">To Sherlock Holmes she is always the woman.</p>
+      <p>I had seen little of Holmes lately.</p>
+    </div>
+    <footer class="pg-boilerplate pgheader" id="pg-footer">
+      <h2>THE FULL PROJECT GUTENBERG LICENSE</h2>
+    </footer>`
+	chs := parseChapters(t, body)
+	if len(chs) != 1 {
+		t.Fatalf("chapters = %d, want 1", len(chs))
+	}
+	ch := chs[0]
+	if ch.Title != "I. A SCANDAL IN BOHEMIA" {
+		t.Fatalf("title = %q, want %q", ch.Title, "I. A SCANDAL IN BOHEMIA")
+	}
+	if len(ch.Paragraphs) != 2 {
+		t.Fatalf("paragraphs = %d, want 2 (leading headings + boilerplate excluded)", len(ch.Paragraphs))
+	}
+	for _, p := range ch.Paragraphs {
+		if p.Role != tbook.RoleBody {
+			t.Errorf("paragraph role = %q, want body", p.Role)
+		}
+		if strings.Contains(p.Text, "LICENSE") {
+			t.Errorf("Gutenberg boilerplate leaked into chapter: %q", p.Text)
+		}
+	}
+	if ch.Paragraphs[0].Text != "To Sherlock Holmes she is always the woman." {
+		t.Errorf("first body paragraph = %q", ch.Paragraphs[0].Text)
 	}
 }
 

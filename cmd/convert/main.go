@@ -69,7 +69,7 @@ func run() error {
 
 	// Only the untranslated work needs the API; a fully-cached run assembles
 	// offline (resume / re-assemble) without a key.
-	pending := translate.CountPending(sentences, cfg.Targets, cfg.CacheDir, cfg.Source, cfg.Model)
+	pending := translate.CountPending(sentences, cfg.Targets, cfg.CacheDir, cfg.Source, cfg.Model, cfg.Force)
 	if pending > 0 {
 		if cfg.APIKey == "" {
 			return fmt.Errorf("%d sentences need translating but OPENROUTER_API_KEY is not set "+
@@ -88,6 +88,7 @@ func run() error {
 		pipe := &translate.Pipeline{
 			Client: client, CacheDir: cfg.CacheDir, Source: cfg.Source,
 			BatchSize: cfg.BatchSize, Concurrency: cfg.Concurrency,
+			Force: cfg.Force,
 		}
 		if err := pipe.Run(ctx, sentences, cfg.Targets); err != nil {
 			return err

@@ -24,6 +24,7 @@ type Pipeline struct {
 	Source      string
 	BatchSize   int
 	Concurrency int
+	Force       bool // re-translate even cached sentences (overwrites cache)
 }
 
 type item struct {
@@ -61,9 +62,11 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 			continue
 		}
 		seen[key] = true
-		if _, ok := cache.Read(p.CacheDir, key); ok {
-			cached++
-			continue
+		if !p.Force {
+			if _, ok := cache.Read(p.CacheDir, key); ok {
+				cached++
+				continue
+			}
 		}
 		todo = append(todo, item{key: key, s: s})
 	}
@@ -152,8 +155,9 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item) {
 
 // CountPending returns how many unique (sentence,target) translations are not
 // yet cached — i.e. how much work needs the API. Zero means a fully offline
-// assemble/resume is possible (no key required).
-func CountPending(sentences []*tbook.Sentence, targets []string, cacheDir, source, model string) int {
+// assemble/resume is possible (no key required). When force is set every unique
+// pair counts as pending, since cached entries will be re-translated.
+func CountPending(sentences []*tbook.Sentence, targets []string, cacheDir, source, model string, force bool) int {
 	seen := map[string]bool{}
 	pending := 0
 	for _, target := range targets {
@@ -163,6 +167,10 @@ func CountPending(sentences []*tbook.Sentence, targets []string, cacheDir, sourc
 				continue
 			}
 			seen[key] = true
+			if force {
+				pending++
+				continue
+			}
 			if _, ok := cache.Read(cacheDir, key); !ok {
 				pending++
 			}

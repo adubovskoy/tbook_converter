@@ -1,8 +1,10 @@
 // Package epub parses an EPUB into chapters of raw paragraph text, in spine
-// (reading) order. Faithful port of tbook.py's parse_epub: chapters split on
-// <div class="title1">; <div class="title"|"epigraph"> and their contents are
-// front matter and skipped; only <p> prose after the first chapter heading is
-// kept. The cover image bytes are extracted for the archive.
+// (reading) order. Chapters split on <div class="title1"> (title is the div's
+// text) or <div class="chapter"> (title is its first inner heading, the style
+// Project Gutenberg's ebookmaker emits); <div class="title"|"epigraph"> and
+// Gutenberg's <*.pg-boilerplate> header/footer are skipped; only <p> prose
+// after the first chapter heading is kept. The cover image bytes are extracted
+// for the archive.
 package epub
 
 import (
@@ -69,6 +71,27 @@ type opf struct {
 	} `xml:"spine"`
 }
 
+// ncx is the EPUB2 navigation document. Only the TOP-LEVEL navPoints (direct
+// children of navMap) are unmarshaled; nested navPoints (a story's numbered
+// parts) are intentionally not modeled, so each story becomes one chapter.
+type ncx struct {
+	NavMap struct {
+		NavPoints []ncxNavPoint `xml:"navPoint"`
+	} `xml:"navMap"`
+}
+
+type ncxNavPoint struct {
+	Text    string `xml:"navLabel>text"`
+	Content struct {
+		Src string `xml:"src,attr"`
+	} `xml:"content"`
+}
+
+type tocEntry struct {
+	Title string
+	File  string // resolved zip entry name (fragment stripped)
+}
+
 // Parse reads the EPUB at path and returns its title, author, cover, and
 // chapters.
 func Parse(epubPath string) (*Book, error) {
@@ -111,6 +134,20 @@ func Parse(epubPath string) (*Book, error) {
 		book.Author = "Unknown"
 	}
 
+	// Prefer the EPUB's own navigation (NCX) for chapter boundaries: each
+	// TOP-LEVEL nav entry is one chapter. This groups multi-file stories and
+	// folds nested sub-sections (numbered parts) into their parent — far more
+	// reliable than guessing from heading classes, which collapses or
+	// over-splits anthologies. Falls back to heading-based splitting (inside
+	// parseDoc) when no usable NCX is present.
+	chapterStarts := map[string]string{}
+	for _, e := range tocTopLevel(files, pkg, opfDir) {
+		if _, ok := chapterStarts[e.File]; !ok {
+			chapterStarts[e.File] = e.Title
+		}
+	}
+	tocMode := len(chapterStarts) >= 2
+
 	// Walk spine docs in order, accumulating chapters. `current` persists across
 	// files (a chapter may continue into the next spine document).
 	var current *segment.ParsedChapter
@@ -130,39 +167,77 @@ func Parse(epubPath string) (*Book, error) {
 		if err != nil {
 			continue
 		}
-		current = parseDoc(content, current, &book.Chapters)
+		if tocMode {
+			if title, ok := chapterStarts[name]; ok {
+				if current != nil {
+					book.Chapters = append(book.Chapters, *current)
+				}
+				current = &segment.ParsedChapter{Title: title}
+			}
+		}
+		current = parseDoc(content, current, &book.Chapters, tocMode)
 	}
 	if current != nil {
 		book.Chapters = append(book.Chapters, *current)
 	}
+
+	// Drop bare title-page chapters (no prose) that would render blank.
+	book.Chapters = dropEmptyChapters(book.Chapters)
 	return book, nil
 }
 
 // parseDoc walks one XHTML document's block elements in document order, updating
 // the current chapter and appending completed chapters. Returns the (possibly
 // new) current chapter. Block prose carries its role (heading/subtitle/scene
-// break/body) and inline italic/bold spans for v3 formatting fidelity.
-func parseDoc(content []byte, current *segment.ParsedChapter, out *[]segment.ParsedChapter) *segment.ParsedChapter {
+// break/body) and inline italic/bold spans for formatting fidelity.
+func parseDoc(content []byte, current *segment.ParsedChapter, out *[]segment.ParsedChapter, tocMode bool) *segment.ParsedChapter {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(fixSelfClosing(string(content))))
 	if err != nil {
 		return current
 	}
+	// titlePending is true from a <div class="chapter"> boundary until the
+	// chapter's first body paragraph: leading headings inside the wrapper form
+	// the title and are not repeated as body (mirrors the div.title1 path).
+	titlePending := false
 	doc.Find("body").Find("div, p, h1, h2, h3, h4, h5, h6").Each(func(_ int, s *goquery.Selection) {
 		if goquery.NodeName(s) == "div" {
-			if s.HasClass("title1") { // chapter boundary
-				if current != nil {
-					*out = append(*out, *current)
+			// When the EPUB navigation (NCX) drives chapter boundaries, heading
+			// divs do NOT split chapters here — that would over-split anthologies
+			// whose stories use mixed heading classes and whose multi-part
+			// stories nest numbered sub-sections.
+			if !tocMode {
+				switch {
+				case hasTitleNClass(s): // boundary; any "titleN" div's text is the title
+					if current != nil {
+						*out = append(*out, *current)
+					}
+					current = &segment.ParsedChapter{Title: segment.CleanText(s.Text())}
+					titlePending = false
+				case s.HasClass("chapter"): // boundary; title comes from its first heading
+					if current != nil {
+						*out = append(*out, *current)
+					}
+					current = &segment.ParsedChapter{}
+					titlePending = true
 				}
-				current = &segment.ParsedChapter{Title: segment.CleanText(s.Text())}
 			}
-			// "title" (book title) / "epigraph" divs: ignored as front matter.
+			// heading / "title" / "epigraph" divs carry no body prose themselves.
 			return
 		}
 		// <p>/<hN> prose.
-		if inSpecialDiv(s) || current == nil {
+		if inSpecialDiv(s) || inBoilerplate(s) || current == nil {
 			return
 		}
 		role := paragraphRole(s)
+		if titlePending && role == tbook.RoleHeading {
+			// Leading heading(s) of a div.chapter: the first fills the chapter
+			// title; any others (e.g. a repeated chapter number) are dropped.
+			if current.Title == "" {
+				current.Title = segment.CleanText(s.Text())
+			}
+			return
+		}
+		titlePending = false
 		raw, rawSpans := richText(s)
 		text, spans := segment.CleanWithSpans(raw, rawSpans)
 		if text == "" && role != tbook.RoleSceneBreak {
@@ -175,6 +250,86 @@ func parseDoc(content []byte, current *segment.ParsedChapter, out *[]segment.Par
 		})
 	})
 	return current
+}
+
+// titleNClass matches heading-div classes title1, title2, … (story/section
+// headings) but not the plain "title" book-title wrapper.
+var titleNClass = regexp.MustCompile(`^title\d+$`)
+
+func hasTitleNClass(s *goquery.Selection) bool {
+	cls, _ := s.Attr("class")
+	for _, c := range strings.Fields(cls) {
+		if titleNClass.MatchString(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// tocTopLevel returns the ordered TOP-LEVEL table-of-contents entries from the
+// NCX (EPUB2). Nested sub-entries (e.g. a story's numbered parts) are excluded
+// so each story/section becomes exactly one chapter. Returns nil when no usable
+// NCX is found (caller then falls back to heading-based splitting).
+func tocTopLevel(files map[string]*zip.File, pkg *opf, opfDir string) []tocEntry {
+	var ncxPath string
+	for _, it := range pkg.Manifest.Items {
+		if it.MediaType == "application/x-dtbncx+xml" ||
+			strings.HasSuffix(strings.ToLower(it.Href), ".ncx") {
+			ncxPath = resolve(opfDir, it.Href)
+			break
+		}
+	}
+	if ncxPath == "" {
+		return nil
+	}
+	b, err := readNamed(files, ncxPath)
+	if err != nil {
+		return nil
+	}
+	var n ncx
+	if err := xml.Unmarshal(b, &n); err != nil {
+		return nil
+	}
+	ncxDir := path.Dir(ncxPath)
+	var out []tocEntry
+	for _, np := range n.NavMap.NavPoints {
+		src := np.Content.Src
+		if src == "" {
+			continue
+		}
+		if i := strings.IndexByte(src, '#'); i >= 0 {
+			src = src[:i]
+		}
+		out = append(out, tocEntry{
+			Title: segment.CleanText(np.Text),
+			File:  resolve(ncxDir, src),
+		})
+	}
+	return out
+}
+
+// dropEmptyChapters removes chapters with no prose (e.g. a bare title page),
+// which render as a blank "1/1" page. Keeps the input if every chapter is empty.
+func dropEmptyChapters(chs []segment.ParsedChapter) []segment.ParsedChapter {
+	kept := make([]segment.ParsedChapter, 0, len(chs))
+	for _, c := range chs {
+		if chapterHasBody(c) {
+			kept = append(kept, c)
+		}
+	}
+	if len(kept) == 0 {
+		return chs
+	}
+	return kept
+}
+
+func chapterHasBody(c segment.ParsedChapter) bool {
+	for _, p := range c.Paragraphs {
+		if strings.TrimSpace(p.Text) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // paragraphRole maps a block element to its .tbook role. Headings (h1–h6) and the
@@ -243,6 +398,12 @@ func richText(s *goquery.Selection) (string, []tbook.Span) {
 // inSpecialDiv reports whether the element is inside a title/title1/epigraph div.
 func inSpecialDiv(s *goquery.Selection) bool {
 	return s.ParentsFiltered("div.title, div.title1, div.epigraph").Length() > 0
+}
+
+// inBoilerplate reports whether the element is inside Project Gutenberg's
+// pg-boilerplate header/footer (ebook banner, license text) — never book prose.
+func inBoilerplate(s *goquery.Selection) bool {
+	return s.Closest(".pg-boilerplate").Length() > 0
 }
 
 func rootfilePath(files map[string]*zip.File) (string, error) {
