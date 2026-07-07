@@ -3,22 +3,28 @@ package tbook
 import (
 	"archive/zip"
 	"fmt"
+	"math"
 	"os"
+	"sort"
+	"unicode"
 
 	"github.com/dimando/reader/converter/internal/jsonx"
 )
 
 // chapterPayload is the on-disk shape of chapters/chN.json. ParagraphStyles is a
 // parallel array of per-paragraph roles; omitted entirely when every paragraph
-// is ordinary body text.
+// is ordinary body text. Figures/Tables attach images and tables to paragraphs
+// by index; omitted when the chapter has none.
 type chapterPayload struct {
 	Paragraphs      [][]*Sentence `json:"paragraphs"`
 	ParagraphStyles []string      `json:"paragraphStyles,omitempty"`
+	Figures         []Figure      `json:"figures,omitempty"`
+	Tables          []Table       `json:"tables,omitempty"`
 }
 
-// Write assembles the .tbook ZIP: manifest.json + cover.jpg + chapters/chN.json.
-// Chapters are numbered ch1..chN (1-based). cover may be nil.
-func Write(outPath, title, author, source string, targets []string, cover []byte, chapters []Chapter) error {
+// Write assembles the .tbook ZIP: manifest.json + cover.jpg + chapters/chN.json
+// (+ notes.json and images/* when present). Chapters are numbered ch1..chN.
+func Write(outPath string, b *Book) error {
 	f, err := os.Create(outPath)
 	if err != nil {
 		return err
@@ -28,18 +34,22 @@ func Write(outPath, title, author, source string, targets []string, cover []byte
 	zw := zip.NewWriter(f)
 	man := Manifest{
 		FormatVersion: 1,
-		Title:         title,
-		Author:        author,
-		SourceLang:    source,
-		TargetLangs:   targets,
-		Chapters:      make([]ChapterRef, 0, len(chapters)),
+		Title:         b.Title,
+		Author:        b.Author,
+		SourceLang:    b.Source,
+		TargetLangs:   b.Targets,
+		Chapters:      make([]ChapterRef, 0, len(b.Chapters)),
 	}
-	if cover != nil {
+	if b.Cover != nil {
 		c := "cover.jpg"
 		man.Cover = &c
 	}
+	if len(b.Notes) > 0 {
+		n := "notes.json"
+		man.Notes = &n
+	}
 
-	for i, ch := range chapters {
+	for i, ch := range b.Chapters {
 		cid := fmt.Sprintf("ch%d", i+1)
 		fname := "chapters/" + cid + ".json"
 		title := ch.Title
@@ -48,51 +58,137 @@ func Write(outPath, title, author, source string, targets []string, cover []byte
 		}
 		man.Chapters = append(man.Chapters, ChapterRef{ID: cid, Title: title, File: fname})
 
+		for _, t := range ch.Tables {
+			for _, row := range t.Rows {
+				for _, cell := range row {
+					normalizeSentences(cell.Sentences)
+				}
+			}
+		}
 		payload := chapterPayload{
 			Paragraphs:      normalizeParas(ch.Paragraphs),
 			ParagraphStyles: trimStyles(ch.ParagraphStyles, len(ch.Paragraphs)),
+			Figures:         ch.Figures,
+			Tables:          ch.Tables,
 		}
-		b, err := jsonx.Marshal(payload)
+		bts, err := jsonx.Marshal(payload)
 		if err != nil {
 			return err
 		}
-		if err := writeEntry(zw, fname, b); err != nil {
+		if err := writeEntry(zw, fname, bts); err != nil {
 			return err
 		}
 	}
 
-	if cover != nil {
-		if err := writeEntry(zw, "cover.jpg", cover); err != nil {
+	if len(b.Notes) > 0 {
+		for _, n := range b.Notes {
+			_ = normalizeParas(n.Paragraphs)
+		}
+		bts, err := jsonx.Marshal(b.Notes)
+		if err != nil {
+			return err
+		}
+		if err := writeEntry(zw, "notes.json", bts); err != nil {
 			return err
 		}
 	}
-	b, err := jsonx.MarshalIndent(man, "  ")
+	// Deterministic image order.
+	names := make([]string, 0, len(b.Images))
+	for name := range b.Images {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := writeEntry(zw, name, b.Images[name]); err != nil {
+			return err
+		}
+	}
+
+	if b.Cover != nil {
+		if err := writeEntry(zw, "cover.jpg", b.Cover); err != nil {
+			return err
+		}
+	}
+	bts, err := jsonx.MarshalIndent(man, "  ")
 	if err != nil {
 		return err
 	}
-	if err := writeEntry(zw, "manifest.json", b); err != nil {
+	if err := writeEntry(zw, "manifest.json", bts); err != nil {
 		return err
 	}
 	return zw.Close()
 }
 
 // normalizeParas ensures every sentence serializes with non-null words/align
-// (the spec requires "align": [] and a words array, never null).
+// (the spec requires "align": [] and a words array, never null) and stamps each
+// non-empty translation's coverage score q.
 func normalizeParas(paras [][]*Sentence) [][]*Sentence {
 	for _, para := range paras {
-		for _, s := range para {
-			if s.Words == nil {
-				s.Words = [][2]int{}
-			}
-			for code, tr := range s.Tr {
-				if tr.Align == nil {
-					tr.Align = []AlignChunk{}
-					s.Tr[code] = tr
-				}
-			}
-		}
+		normalizeSentences(para)
 	}
 	return paras
+}
+
+func normalizeSentences(sents []*Sentence) {
+	for _, s := range sents {
+		if s.Words == nil {
+			s.Words = [][2]int{}
+		}
+		for code, tr := range s.Tr {
+			if tr.Align == nil {
+				tr.Align = []AlignChunk{}
+			}
+			tr.Q = coverageQ(tr)
+			s.Tr[code] = tr
+		}
+	}
+}
+
+// coverageQ is the per-sentence alignment-coverage score: the fraction of
+// rendered translation words (chunks containing a letter/digit) whose chunk
+// highlights ≥1 source word. 0 when nothing is rendered or aligned.
+func coverageQ(tr Translation) float64 {
+	if tr.Text == "" || len(tr.Align) == 0 {
+		return 0
+	}
+	runes := []rune(tr.Text)
+	words, aligned := 0, 0
+	for _, c := range tr.Align {
+		a, b := clampRange(c.T[0], c.T[1], len(runes))
+		if !hasLetterOrDigit(runes[a:b]) {
+			continue
+		}
+		words++
+		if len(c.W) > 0 {
+			aligned++
+		}
+	}
+	if words == 0 {
+		return 0
+	}
+	return math.Round(100*float64(aligned)/float64(words)) / 100
+}
+
+func clampRange(a, b, n int) (int, int) {
+	if a < 0 {
+		a = 0
+	}
+	if b > n {
+		b = n
+	}
+	if a > b {
+		a = b
+	}
+	return a, b
+}
+
+func hasLetterOrDigit(rs []rune) bool {
+	for _, r := range rs {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // trimStyles returns the per-paragraph role array padded/clamped to nParas and

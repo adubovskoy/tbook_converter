@@ -15,15 +15,58 @@ import (
 	"github.com/dimando/reader/converter/internal/tbook"
 )
 
-// PromptVersion keys the alignment-prompt contract; bump only if the alignment
-// rules change (it invalidates cached entries). v3 = word-level by source TEXT.
-const PromptVersion = "v3"
+// PromptVersion keys the ALIGN production contract; bump only if the alignment
+// rules change (it invalidates cached aligned entries). v7 = raw-canonical
+// text: the final translation text is the pass-1 raw translation verbatim, and
+// the align pass only locates echoed fragments inside it (whole-word matches
+// only) — a sloppy echo can no longer strip punctuation or rewrite words.
+// (v6 = same without word-boundary matching; v5 = numbered-echo alignment,
+// text reconstructed from the echo; v4 = plain match-by-text.)
+const PromptVersion = "v7"
 
-// Key returns the cache key for one sentence in one language.
+// TrPromptVersion keys the TRANSLATE (pass 1) contract separately, so an
+// align-only contract change re-aligns the book without re-translating it.
+// Bump only if the translation prompt/rules change.
+const TrPromptVersion = "v4"
+
+// Key returns the cache key for one sentence's FINAL aligned translation.
 func Key(src, source, target, model string) string {
 	raw := PromptVersion + "|" + model + "|" + source + "|" + target + "|" + src
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
+}
+
+// TrKey returns the cache key for a sentence's RAW translation text (pass 1),
+// before pass 2 computes the alignment. A distinct namespace ("|tr|") from Key
+// so a translated-but-not-yet-aligned sentence is never mistaken for a finished
+// one.
+func TrKey(src, source, target, model string) string {
+	raw := TrPromptVersion + "|tr|" + model + "|" + source + "|" + target + "|" + src
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+// Invalidate deletes the cached translation AND alignment for each source
+// sentence (across all targets) — used by the verify/QA loop: a semantic check
+// flags bad sentences, this clears them, and the next run redoes exactly those
+// (e.g. with a stronger model). Returns the number of cache files removed.
+func Invalidate(dir string, srcs, targets []string, source, model string) int {
+	removed := 0
+	for _, src := range srcs {
+		for _, target := range targets {
+			for _, key := range []string{Key(src, source, target, model), TrKey(src, source, target, model)} {
+				if os.Remove(filepath.Join(dir, key+".json")) == nil {
+					removed++
+				}
+			}
+		}
+	}
+	return removed
+}
+
+// Remove deletes one cached entry (no-op if absent).
+func Remove(dir, key string) {
+	_ = os.Remove(filepath.Join(dir, key+".json"))
 }
 
 // Read returns the cached translation for a key, or ok=false if absent/corrupt.

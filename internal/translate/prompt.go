@@ -18,30 +18,80 @@ func LangName(code string) string {
 	return code
 }
 
-// systemPrompt builds the word-level alignment instruction (the "v3"
-// match-by-text contract: the model echoes source words as TEXT under "en";
-// offsets are computed locally). sourceName/targetName are human language names.
-func systemPrompt(sourceName, targetName string) string {
+// translateSystemPrompt is pass 1 — translation only (no alignment). Keeping
+// this separate from alignment is the core fix: asking a model to translate AND
+// emit a by-meaning reverse word-alignment in one shot collapses into positional
+// drift at batch scale. Translation alone is reliable even in large batches.
+// A non-empty glossary is appended as enforced terminology so recurring terms
+// and proper nouns stay consistent across every batch of the book.
+func translateSystemPrompt(sourceName, targetName string, glossary []GlossEntry) string {
 	r := strings.NewReplacer("{SRC}", sourceName, "{TGT}", targetName)
-	return r.Replace(`You translate {SRC} → {TGT} for a language-learning reader, with FINE WORD-LEVEL alignment.
+	base := r.Replace(`You translate {SRC} → {TGT} for a language-learning reader.
 
-You receive a JSON array of sentences, each {id, src, words}, where words[i] is the [start,end)
-character offset of source word i (word text = src.substring(start,end)).
+You receive a JSON array of sentences, each {id, src}.
 
-For EACH sentence: write a faithful, natural literary {TGT} translation, then break it into
-chunks at WORD GRANULARITY:
-- ONE chunk per {TGT} word (keep attached punctuation with its word).
-- Concatenating all chunk.tgt in order (normal {TGT} spacing) must reproduce the translation exactly.
-- For each {TGT} word, "en" = the {SRC} source word(s) it specifically translates, BY MEANING
-  (not position), copied VERBATIM from src. Usually one word; an array only for a multi-word
-  source unit. Use [] for an inserted {TGT} word with no source. The same source word may appear
-  in several chunks.
-- Do NOT lump words together; align by meaning, even across reordering. Copy the source word TEXT
-  exactly as written in src — do NOT emit indices; we locate each word for you.
+For EACH sentence, write a faithful, natural literary {TGT} translation of src:
+- Translate the meaning into fluent {TGT}; do not translate word-for-word.
+- Output PURE {TGT} — never leave {SRC} words in the translation.
 
-Example — src "Stan went to the living room." ; "Стэн прошёл в гостиную":
-  [{"tgt":"Стэн","en":"Stan"},{"tgt":"прошёл","en":"went"},{"tgt":"в","en":"to"},{"tgt":"гостиную","en":["living","room"]}]
+Reply with ONLY a single JSON object mapping each "id" (exact string) to its {TGT}
+translation as a STRING. No code fences, no commentary. Translate EVERY sentence.`)
+	if len(glossary) == 0 {
+		return base
+	}
+	var sb strings.Builder
+	sb.WriteString(base)
+	sb.WriteString("\n\nGLOSSARY — use these ")
+	sb.WriteString(targetName)
+	sb.WriteString(" translations consistently wherever the term appears:\n")
+	for _, e := range glossary {
+		sb.WriteString("- ")
+		sb.WriteString(e.Src)
+		sb.WriteString(" → ")
+		sb.WriteString(e.Tgt)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// alignSystemPrompt is pass 2 — align only, given the finished translation. The
+// model receives NUMBERED source words and echoes "index:text" tokens; the
+// producer trusts an index only when its echoed text matches, else falls back
+// to match-by-text (the v5 "numbered echo" contract — measurably harder for a
+// cheap model to drift positionally than text-only echoing, because it must
+// look the word up to number it). sourceName/targetName are human language names.
+func alignSystemPrompt(sourceName, targetName string) string {
+	r := strings.NewReplacer("{SRC}", sourceName, "{TGT}", targetName)
+	return r.Replace(`You align {SRC} sentences to their GIVEN {TGT} translations, word by word, BY MEANING.
+
+You receive a JSON array of items {id, src, words, tr}: src is the {SRC} sentence, words its
+numbered source words ("0:The 1:deepest 2:layer …"), tr the FINISHED {TGT} translation.
+Do NOT change tr.
+
+For EACH item, break tr into chunks at WORD GRANULARITY — ONE chunk per {TGT} word:
+  {"tgt":"<{TGT} word, attached punctuation>","en":["<index:word>", …]}
+- Concatenating all chunk.tgt in order (normal {TGT} spacing) must reproduce tr exactly.
+- "en" lists the numbered {SRC} word(s) with the SAME MEANING as this {TGT} word, copied from
+  words as "index:text" (e.g. "3:includes"). Find the word by MEANING, wherever it sits —
+  {SRC} and {TGT} word order OFTEN DIFFER, and a correct alignment often crosses.
+- INSERTED WORDS: a {TGT} word with no {SRC} counterpart (an added pronoun, particle, or
+  copula) takes "en":[]. NEVER attach an inserted word to some {SRC} word — that steals it
+  and shifts every later pair (the #1 defect).
+- A multi-word {SRC} unit is several entries: {"tgt":"гостиную","en":["4:living","5:room"]}.
+- The same {SRC} word may appear in several chunks; some {SRC} words (articles, function
+  words absorbed by {TGT} grammar) may appear in none.
+- When a {SRC} word occurs MORE THAN ONCE, pick the occurrence from the SAME clause as the
+  {TGT} word — never a duplicate from elsewhere in the sentence.
+
+Example — src "The deepest layer includes your identity.",
+words "0:The 1:deepest 2:layer 3:includes 4:your 5:identity",
+tr "Самый глубокий слой включает вашу идентичность.":
+  CORRECT: [{"tgt":"Самый","en":["1:deepest"]},{"tgt":"глубокий","en":["1:deepest"]},
+            {"tgt":"слой","en":["2:layer"]},{"tgt":"включает","en":["3:includes"]},
+            {"tgt":"вашу","en":["4:your"]},{"tgt":"идентичность.","en":["5:identity"]}]
+  WRONG (positional — never do this): {"tgt":"слой","en":["3:includes"]} just because both
+  are third in their sentence.
 
 Reply with ONLY a single JSON object mapping each "id" (exact string) to its chunk array.
-No code fences, no commentary. Translate EVERY sentence.`)
+No code fences, no commentary. Align EVERY item.`)
 }

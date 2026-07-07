@@ -11,7 +11,7 @@ import (
 func TestCleanWithSpansMapsThroughWhitespace(t *testing.T) {
 	// raw "He  was here" — two spaces collapse to one, so "was" shifts left by one.
 	raw := "He  was here"
-	clean, spans := CleanWithSpans(raw, []tbook.Span{{S: 4, E: 7, K: tbook.SpanItalic}}) // "was" in raw
+	clean, spans, _ := CleanWithSpans(raw, []tbook.Span{{S: 4, E: 7, K: tbook.SpanItalic}}, nil) // "was" in raw
 	if clean != "He was here" {
 		t.Fatalf("clean = %q", clean)
 	}
@@ -29,7 +29,7 @@ func TestSegmentParagraphDistributesSpans(t *testing.T) {
 	// "very" (offset 7..11) is emphasized; it must land on the first sentence only,
 	// rebased to that sentence's own coordinates (which start at 0 here).
 	text := "He was very tired. Stan left."
-	res := segmentParagraph(text, []tbook.Span{{S: 7, E: 11, K: tbook.SpanItalic}}, seg)
+	res := segmentParagraph(text, []tbook.Span{{S: 7, E: 11, K: tbook.SpanItalic}}, nil, seg)
 	if len(res) != 2 {
 		t.Fatalf("got %d sentences, want 2: %+v", len(res), res)
 	}
@@ -50,7 +50,7 @@ func TestSegmentParagraphSpanCrossingSentences(t *testing.T) {
 	// A span covering the join of two sentences must be clipped to each.
 	text := "One done. Two next."
 	// emphasize "done. Two" → rune [4,13)
-	res := segmentParagraph(text, []tbook.Span{{S: 4, E: 13, K: tbook.SpanBold}}, seg)
+	res := segmentParagraph(text, []tbook.Span{{S: 4, E: 13, K: tbook.SpanBold}}, nil, seg)
 	if len(res) != 2 {
 		t.Fatalf("got %d sentences, want 2", len(res))
 	}
@@ -71,7 +71,7 @@ func TestBuildSentenceObjectsKeepsSceneBreakAndStyles(t *testing.T) {
 			{Text: "Sub", Role: tbook.RoleSubtitle},
 		},
 	}}
-	out, all := BuildSentenceObjects(chapters)
+	out, all := BuildSentenceObjects(chapters, "en")
 	if len(out) != 1 {
 		t.Fatalf("chapters = %d", len(out))
 	}
@@ -100,5 +100,59 @@ func TestSplitSentencesUnchanged(t *testing.T) {
 	}
 	if SplitSentences("   ", seg) != nil {
 		t.Fatalf("blank paragraph should yield nil")
+	}
+}
+
+func TestSegmentParagraphDistributesMarks(t *testing.T) {
+	seg := sentencizer.NewSegmenter("en")
+	// Marker 1 sits right after "tired." (end of sentence 1); marker 2 mid-word
+	// region of sentence 2; marker 3 at the very end.
+	text := "He was very tired. Stan left the room."
+	marks := []Mark{
+		{Pos: 18, ID: "n1", Label: "1"},  // after "tired."
+		{Pos: 28, ID: "n2", Label: "*"},  // after "left" in sentence 2
+		{Pos: 38, ID: "n3", Label: "2"},  // end of text
+	}
+	res := segmentParagraph(text, nil, marks, seg)
+	if len(res) != 2 {
+		t.Fatalf("got %d sentences, want 2", len(res))
+	}
+	if len(res[0].Marks) != 1 || res[0].Marks[0].ID != "n1" {
+		t.Fatalf("sentence 0 marks = %+v, want n1", res[0].Marks)
+	}
+	if got := res[0].Marks[0].Pos; got != len([]rune(res[0].Src)) {
+		t.Errorf("n1 pos = %d, want end of sentence (%d)", got, len([]rune(res[0].Src)))
+	}
+	if len(res[1].Marks) != 2 || res[1].Marks[0].ID != "n2" || res[1].Marks[1].ID != "n3" {
+		t.Fatalf("sentence 1 marks = %+v, want n2,n3", res[1].Marks)
+	}
+	// "Stan left| the room." — n2 lands right after "left" (local offset 9).
+	if got := res[1].Marks[0].Pos; got != 9 {
+		t.Errorf("n2 local pos = %d, want 9", got)
+	}
+	if got := res[1].Marks[1].Pos; got != len([]rune(res[1].Src)) {
+		t.Errorf("n3 pos = %d, want end", got)
+	}
+}
+
+func TestBuildNotesSeparatesCitations(t *testing.T) {
+	notes := []ParsedNote{
+		{ID: "n1", Label: "1", Kind: tbook.NoteKindCitation,
+			Paragraphs: []ParsedParagraph{{Text: "Duhigg, The Power of Habit, 2014.", Role: tbook.RoleBody}}},
+		{ID: "n2", Label: "*", Kind: tbook.NoteKindNote,
+			Paragraphs: []ParsedParagraph{{Text: "A content note. With two sentences.", Role: tbook.RoleBody}}},
+	}
+	out, noteSents, citeSents := BuildNotes(notes, "en")
+	if len(out) != 2 {
+		t.Fatalf("notes = %d, want 2", len(out))
+	}
+	if len(citeSents) != 1 {
+		t.Fatalf("citation sentences = %d, want 1", len(citeSents))
+	}
+	if len(noteSents) != 2 {
+		t.Fatalf("note sentences = %d, want 2", len(noteSents))
+	}
+	if len(out["n2"].Paragraphs) != 1 || len(out["n2"].Paragraphs[0]) != 2 {
+		t.Fatalf("n2 paragraphs = %+v", out["n2"].Paragraphs)
 	}
 }

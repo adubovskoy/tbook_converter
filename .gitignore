@@ -4,3 +4,4 @@
 # Secrets and resumable translation cache
 .env
 .tbook_cache/
+lexicons/

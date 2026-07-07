@@ -82,10 +82,11 @@ func (e *apiError) permanent() bool {
 	return false
 }
 
-// Translate sends one batch (system instructions + user JSON) and returns the
-// parsed id→chunks map. Retries transient failures (network, 5xx, 429, parse
-// errors) with exponential backoff, honoring Retry-After on 429.
-func (c *Client) Translate(ctx context.Context, system, userJSON string) (map[string][]align.Chunk, error) {
+// chat sends one batch (system instructions + user JSON) and invokes parse on
+// the model's reply. Retries transient failures (network, 5xx, 429, and parse
+// errors — parse returning non-nil) with exponential backoff, honoring
+// Retry-After on 429. Permanent HTTP statuses are not retried.
+func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(content string) error) error {
 	req := chatRequest{
 		Model:       c.opts.Model,
 		Messages:    []message{{Role: "system", Content: system}, {Role: "user", Content: userJSON}},
@@ -96,7 +97,7 @@ func (c *Client) Translate(ctx context.Context, system, userJSON string) (map[st
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	var lastErr error
@@ -106,27 +107,74 @@ func (c *Client) Translate(ctx context.Context, system, userJSON string) (map[st
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return ctx.Err()
 			}
 		}
 		content, retryAfter, err := c.once(ctx, payload)
 		if err != nil {
 			lastErr = err
 			if ae, ok := err.(*apiError); ok && ae.permanent() {
-				return nil, err
+				return err
 			}
 			wait = backoff(attempt, retryAfter)
 			continue
 		}
-		parsed, perr := parseChunks(content)
-		if perr != nil {
+		if perr := parse(content); perr != nil {
 			lastErr = fmt.Errorf("parse response: %w", perr)
 			wait = backoff(attempt, 0)
 			continue
 		}
-		return parsed, nil
+		return nil
 	}
-	return nil, lastErr
+	return lastErr
+}
+
+// Translate runs the ALIGN pass: returns the parsed id→chunks map.
+func (c *Client) Translate(ctx context.Context, system, userJSON string) (map[string][]align.Chunk, error) {
+	var out map[string][]align.Chunk
+	err := c.chat(ctx, system, userJSON, func(content string) error {
+		m, perr := parseChunks(content)
+		if perr != nil {
+			return perr
+		}
+		out = m
+		return nil
+	})
+	return out, err
+}
+
+// ChatJSON sends one batch and unmarshals the model's JSON-object reply into
+// out (tolerating code fences and surrounding prose). Used by the glossary and
+// judge passes.
+func (c *Client) ChatJSON(ctx context.Context, system, userJSON string, out any) error {
+	return c.chat(ctx, system, userJSON, func(content string) error {
+		s := stripFences(content)
+		if err := json.Unmarshal([]byte(s), out); err != nil {
+			if obj := extractObject(s); obj != "" {
+				return json.Unmarshal([]byte(obj), out)
+			}
+			return err
+		}
+		return nil
+	})
+}
+
+// Model returns the model id this client sends requests with.
+func (c *Client) Model() string { return c.opts.Model }
+
+// TranslateText runs the TRANSLATE pass: returns the parsed id→translation-text
+// map (each value a plain string, not chunks).
+func (c *Client) TranslateText(ctx context.Context, system, userJSON string) (map[string]string, error) {
+	var out map[string]string
+	err := c.chat(ctx, system, userJSON, func(content string) error {
+		m, perr := parseTexts(content)
+		if perr != nil {
+			return perr
+		}
+		out = m
+		return nil
+	})
+	return out, err
 }
 
 func (c *Client) once(ctx context.Context, payload []byte) (string, time.Duration, error) {
@@ -178,6 +226,23 @@ func (c *Client) once(ctx context.Context, payload []byte) (string, time.Duratio
 func parseChunks(content string) (map[string][]align.Chunk, error) {
 	s := stripFences(content)
 	var m map[string][]align.Chunk
+	if err := json.Unmarshal([]byte(s), &m); err == nil {
+		return m, nil
+	} else if obj := extractObject(s); obj != "" {
+		if err2 := json.Unmarshal([]byte(obj), &m); err2 == nil {
+			return m, nil
+		}
+		return nil, err
+	} else {
+		return nil, err
+	}
+}
+
+// parseTexts extracts the id→translation-string object from a translate-pass
+// reply, tolerating code fences and surrounding prose (mirrors parseChunks).
+func parseTexts(content string) (map[string]string, error) {
+	s := stripFences(content)
+	var m map[string]string
 	if err := json.Unmarshal([]byte(s), &m); err == nil {
 		return m, nil
 	} else if obj := extractObject(s); obj != "" {

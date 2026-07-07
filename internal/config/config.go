@@ -29,6 +29,7 @@ type Config struct {
 	Targets []string
 
 	BatchSize   int
+	AlignBatch  int // align-pass batch size; 0 = BatchSize/4 (small batches curb positional drift)
 	Concurrency int
 	MaxRetries  int
 	Temperature float64
@@ -40,6 +41,26 @@ type Config struct {
 	DryRun        bool
 	Force         bool
 	Verbose       bool
+
+	// Content extraction.
+	KeepMatter    bool     // keep front/back matter (cover page, synopsis, credits, index)
+	SkipFiles     []string // extra title/filename patterns to skip
+	NoImages      bool     // drop body images
+	NoNotes       bool     // drop footnotes entirely
+	SkipCitations bool     // don't translate citation-kind notes (kept untranslated)
+
+	// Quality passes.
+	Glossary        bool   // build a book glossary and enforce it during translation
+	Judge           bool   // run the semantic verification pass after translating
+	JudgeModel      string // model for the judge pass (default: same as Model)
+	JudgeInvalidate bool   // immediately clear cache for judge-flagged sentences
+	EscalateModel   string // with --judge/--lexcheck: redo flagged sentences with this stronger model, in place
+	Lexcheck        bool   // static dictionary-based drift check
+	LexiconDir      string // directory of compact lexicons (tools/fetch-lexicons.sh)
+
+	// Invalidate, if set, names a file of source sentences whose cached
+	// translation+alignment should be cleared (verify/QA loop); the run then exits.
+	Invalidate string
 }
 
 // Load parses flags + environment (.env already loaded) into a Config.
@@ -70,11 +91,26 @@ func Load(args []string) (*Config, error) {
 	model := fs.String("model", envOr("MODEL", "google/gemini-2.5-flash"), "OpenRouter model id")
 	cacheDir := fs.String("cache-dir", envOr("CACHE_DIR", ".tbook_cache"), "translation cache directory")
 	batchSize := fs.Int("batch-size", envInt("BATCH_SIZE", 16), "sentences per API request")
+	alignBatch := fs.Int("align-batch", envInt("ALIGN_BATCH", 0), "sentences per ALIGN request (0 = batch-size/4; small align batches curb positional drift)")
 	concurrency := fs.Int("concurrency", envInt("CONCURRENCY", 6), "parallel API requests")
 	maxRetries := fs.Int("max-retries", envInt("MAX_RETRIES", 4), "per-request retry attempts")
 	limit := fs.Int("limit-chapters", 0, "only convert the first N chapters (0 = all)")
 	dryRun := fs.Bool("dry-run", false, "parse + segment only; no API calls, no output")
 	force := fs.Bool("force", false, "force re-translation, ignoring cached entries (overwrites cache)")
+	invalidate := fs.String("invalidate", "", "verify/QA loop: clear cached translation+alignment for the "+
+		"source sentences in FILE (JSON array of strings, or one per line), then exit")
+	keepMatter := fs.Bool("keep-matter", false, "keep front/back matter (cover page, synopsis, credits, index)")
+	skipFiles := fs.String("skip-files", "", "extra chapter title/filename patterns to skip, comma-separated (case-insensitive regex)")
+	noImages := fs.Bool("no-images", false, "drop body images (no figures in the output)")
+	noNotes := fs.Bool("no-notes", false, "drop footnotes entirely (markers are still stripped from prose)")
+	skipCitations := fs.Bool("skip-citations", false, "leave citation-kind footnotes untranslated (saves tokens)")
+	glossary := fs.Bool("glossary", false, "build a book glossary first and enforce it during translation for term consistency")
+	judge := fs.Bool("judge", false, "after translating, run an independent LLM judge over every sentence; write flagged sources to <out>.flagged.json")
+	judgeModel := fs.String("judge-model", envOr("JUDGE_MODEL", ""), "model for the judge pass (default: same as --model; see README before pointing it at a stronger model)")
+	judgeInvalidate := fs.Bool("judge-invalidate", false, "with --judge: immediately clear cache for flagged sentences so the next run redoes them")
+	escalateModel := fs.String("escalate-model", envOr("ESCALATE_MODEL", ""), "with --judge/--lexcheck: immediately redo flagged sentences with this stronger model (kept in the primary cache namespace)")
+	lexcheckFlag := fs.Bool("lexcheck", false, "static drift check against a bilingual lexicon (see tools/fetch-lexicons.sh); flags feed --escalate-model")
+	lexiconDir := fs.String("lexicons", envOr("LEXICON_DIR", "lexicons"), "lexicon directory for --lexcheck")
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
 	fs.BoolVar(&verboseSh, "v", false, "shorthand for --verbose")
 
@@ -110,6 +146,7 @@ func Load(args []string) (*Config, error) {
 		Source:        pick(sourceShort, source),
 		Targets:       splitCodes(pick(targetShort, target)),
 		BatchSize:     *batchSize,
+		AlignBatch:    *alignBatch,
 		Concurrency:   *concurrency,
 		MaxRetries:    *maxRetries,
 		Temperature:   envFloat("TEMPERATURE", 0.3),
@@ -120,12 +157,34 @@ func Load(args []string) (*Config, error) {
 		DryRun:        *dryRun,
 		Force:         *force,
 		Verbose:       verbose || verboseSh,
+		KeepMatter:    *keepMatter,
+		SkipFiles:     splitCodes(*skipFiles),
+		NoImages:      *noImages,
+		NoNotes:       *noNotes,
+		SkipCitations: *skipCitations,
+		Glossary:        *glossary,
+		Judge:           *judge,
+		JudgeModel:      *judgeModel,
+		JudgeInvalidate: *judgeInvalidate,
+		EscalateModel:   *escalateModel,
+		Lexcheck:        *lexcheckFlag,
+		LexiconDir:      *lexiconDir,
+		Invalidate:    *invalidate,
+	}
+	// Default judge = translate model. Measured (see README): a stronger judge
+	// keeps full drift recall but flags 50-70% of sentences on style pedantry —
+	// it even rejects 2/3 of its OWN escalated output — which condemns the
+	// escalation loop to mass fallback. The calibrated same-model judge plus
+	// lexcheck is the economical gate; --judge-model remains for audits.
+	if cfg.JudgeModel == "" {
+		cfg.JudgeModel = cfg.Model
 	}
 
-	if cfg.Input == "" {
+	// --invalidate is a cache-maintenance op; it needs no input EPUB.
+	if cfg.Input == "" && cfg.Invalidate == "" {
 		return nil, fmt.Errorf("missing input .epub (usage: convert <book.epub> -o <book.tbook>)")
 	}
-	if cfg.Out == "" {
+	if cfg.Out == "" && cfg.Input != "" {
 		cfg.Out = strings.TrimSuffix(cfg.Input, ".epub") + ".tbook"
 	}
 	if len(cfg.Targets) == 0 {

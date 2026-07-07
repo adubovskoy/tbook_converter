@@ -25,17 +25,60 @@ var (
 	sentFixRE = regexp.MustCompile(`([.!?…]{1,3}["»”’')\]]?)(\p{Lu})`)
 )
 
+// Mark is an inline footnote marker at rune offset Pos of the paragraph text
+// (an insertion point — the marker's label is NOT part of the text). ID is the
+// book-level note id it references; Label its display text ("1", "*", …).
+type Mark struct {
+	Pos   int
+	ID    string
+	Label string
+}
+
+// ParsedFigure is an image attached to a figure paragraph (whose Text is the
+// caption). Image is the OUTPUT archive entry name (e.g. "images/img3.jpg").
+type ParsedFigure struct {
+	Image string
+	Alt   string
+}
+
+// ParsedCell is one table cell: a mini-paragraph of text with emphasis spans
+// and footnote marks, optionally a header cell.
+type ParsedCell struct {
+	Text   string
+	Spans  []tbook.Span
+	Marks  []Mark
+	Header bool
+}
+
+// ParsedTable is a table attached to a table paragraph (which carries no text).
+type ParsedTable struct {
+	Rows [][]ParsedCell
+}
+
 // ParsedParagraph is one parsed paragraph: cleaned text, a role (one of the
-// tbook.Role* constants), and inline-emphasis spans in Text's rune coordinates.
+// tbook.Role* constants), inline-emphasis spans and footnote marks in Text's
+// rune coordinates, plus the figure/table payload for those roles.
 type ParsedParagraph struct {
-	Text  string
-	Role  string
-	Spans []tbook.Span
+	Text   string
+	Role   string
+	Spans  []tbook.Span
+	Marks  []Mark
+	Figure *ParsedFigure // role RoleFigure only
+	Table  *ParsedTable  // role RoleTable only
 }
 
 // ParsedChapter is the raw output of EPUB parsing: a title and paragraphs.
 type ParsedChapter struct {
 	Title      string
+	Paragraphs []ParsedParagraph
+}
+
+// ParsedNote is one footnote/endnote body parsed from the EPUB, before
+// segmentation. Kind is tbook.NoteKindNote or tbook.NoteKindCitation.
+type ParsedNote struct {
+	ID         string
+	Label      string
+	Kind       string
 	Paragraphs []ParsedParagraph
 }
 
@@ -73,11 +116,30 @@ func CleanTextWithMap(s string) (string, []int) {
 	return string(clean), m
 }
 
-// CleanWithSpans cleans raw text and remaps its emphasis spans (in raw rune
-// coordinates) into the cleaned text's coordinates. Used by the EPUB parser.
-func CleanWithSpans(raw string, spans []tbook.Span) (string, []tbook.Span) {
+// CleanWithSpans cleans raw text and remaps its emphasis spans and footnote
+// marks (in raw rune coordinates) into the cleaned text's coordinates. Used by
+// the EPUB parser.
+func CleanWithSpans(raw string, spans []tbook.Span, marks []Mark) (string, []tbook.Span, []Mark) {
 	clean, m := CleanTextWithMap(raw)
-	return clean, remapSpans(spans, m, utf8.RuneCountInString(clean))
+	n := utf8.RuneCountInString(clean)
+	return clean, remapSpans(spans, m, n), remapMarks(marks, m, n)
+}
+
+// remapMarks translates each mark's insertion point through rune-index map m,
+// clamped to [0, dstLen].
+func remapMarks(marks []Mark, m []int, dstLen int) []Mark {
+	if len(marks) == 0 {
+		return nil
+	}
+	out := make([]Mark, 0, len(marks))
+	for _, mk := range marks {
+		p := mapIdx(m, mk.Pos)
+		if p > dstLen {
+			p = dstLen
+		}
+		out = append(out, Mark{Pos: p, ID: mk.ID, Label: mk.Label})
+	}
+	return out
 }
 
 // SplitSentences segments one paragraph into sentence strings.
@@ -126,30 +188,37 @@ func segmentNorm(norm string, seg sentencizer.Segmenter) (sents []string, ranges
 	return sents, ranges
 }
 
-// sentResult is one segmented sentence plus its emphasis spans, rebased to the
-// sentence's own rune coordinates.
+// sentResult is one segmented sentence plus its emphasis spans and footnote
+// marks, rebased to the sentence's own rune coordinates.
 type sentResult struct {
 	Src   string
 	Spans []tbook.Span
+	Marks []Mark
 }
 
-// segmentParagraph segments a paragraph and distributes its emphasis spans (in
-// text's rune coordinates) onto the resulting sentences. Spans follow the same
-// whitespace + sentence-fix normalization as the text, then are clipped to each
-// sentence and rebased to sentence-local offsets.
-func segmentParagraph(text string, spans []tbook.Span, seg sentencizer.Segmenter) []sentResult {
+// segmentParagraph segments a paragraph and distributes its emphasis spans and
+// footnote marks (in text's rune coordinates) onto the resulting sentences.
+// Both follow the same whitespace + sentence-fix normalization as the text,
+// then are clipped to each sentence and rebased to sentence-local offsets.
+func segmentParagraph(text string, spans []tbook.Span, marks []Mark, seg sentencizer.Segmenter) []sentResult {
 	clean, cm := CleanTextWithMap(text)
-	cspans := remapSpans(spans, cm, utf8.RuneCountInString(clean))
+	cleanLen := utf8.RuneCountInString(clean)
+	cspans := remapSpans(spans, cm, cleanLen)
+	cmarks := remapMarks(marks, cm, cleanLen)
 
 	norm := normalizePara(clean) // sentFix only — clean is already collapsed/trimmed
 	nm := mapByInsertion(clean, norm)
-	nspans := remapSpans(cspans, nm, utf8.RuneCountInString(norm))
+	normLen := utf8.RuneCountInString(norm)
+	nspans := remapSpans(cspans, nm, normLen)
+	nmarks := remapMarks(cmarks, nm, normLen)
 
 	sents, ranges := segmentNorm(norm, seg)
 	out := make([]sentResult, 0, len(sents))
+	claimed := make([]bool, len(nmarks))
 	for i, src := range sents {
 		rg := ranges[i]
 		var sps []tbook.Span
+		var mks []Mark
 		if rg[0] >= 0 {
 			for _, sp := range nspans {
 				a, b := sp.S, sp.E
@@ -163,8 +232,28 @@ func segmentParagraph(text string, spans []tbook.Span, seg sentencizer.Segmenter
 					sps = append(sps, tbook.Span{S: a - rg[0], E: b - rg[0], K: sp.K})
 				}
 			}
+			// A mark belongs to the first sentence whose end reaches it (markers
+			// typically sit right after a sentence's final punctuation, at rg[1]).
+			// The last sentence takes any leftovers.
+			srcLen := rg[1] - rg[0]
+			for j, mk := range nmarks {
+				if claimed[j] {
+					continue
+				}
+				if mk.Pos <= rg[1] || i == len(sents)-1 {
+					claimed[j] = true
+					p := mk.Pos - rg[0]
+					if p < 0 {
+						p = 0
+					}
+					if p > srcLen {
+						p = srcLen
+					}
+					mks = append(mks, Mark{Pos: p, ID: mk.ID, Label: mk.Label})
+				}
+			}
 		}
-		out = append(out, sentResult{Src: src, Spans: sps})
+		out = append(out, sentResult{Src: src, Spans: sps, Marks: mks})
 	}
 	return out
 }
@@ -249,42 +338,151 @@ func byteToRune(s string) []int {
 	return m
 }
 
+// segmenterLangs are the language codes the sentencizer library implements;
+// anything else falls back to English rules (sentence-final punctuation is
+// near-universal across European languages, so this stays correct for e.g.
+// Spanish — only language-specific abbreviation lists are missed).
+var segmenterLangs = map[string]bool{
+	"en": true, "ru": true, "ja": true, "zh": true, "he": true, "lt": true,
+}
+
+// NewSegmenter returns a sentence segmenter for the language, falling back to
+// English rules for languages the library does not implement.
+func NewSegmenter(lang string) sentencizer.Segmenter {
+	if !segmenterLangs[lang] {
+		lang = "en"
+	}
+	return sentencizer.NewSegmenter(lang)
+}
+
+// buildSentences segments one paragraph's text into final sentence objects,
+// appending each to *all for in-place translation.
+func buildSentences(text string, spans []tbook.Span, marks []Mark, seg sentencizer.Segmenter, all *[]*tbook.Sentence) []*tbook.Sentence {
+	var sentObjs []*tbook.Sentence
+	for _, r := range segmentParagraph(text, spans, marks, seg) {
+		obj := &tbook.Sentence{
+			Src:   r.Src,
+			Words: Tokenize(r.Src),
+			Tr:    map[string]tbook.Translation{},
+			Spans: r.Spans,
+			Notes: marksToRefs(r.Marks),
+		}
+		sentObjs = append(sentObjs, obj)
+		*all = append(*all, obj)
+	}
+	return sentObjs
+}
+
+func marksToRefs(marks []Mark) []tbook.NoteRef {
+	if len(marks) == 0 {
+		return nil
+	}
+	out := make([]tbook.NoteRef, 0, len(marks))
+	for _, m := range marks {
+		out = append(out, tbook.NoteRef{P: m.Pos, ID: m.ID, Label: m.Label})
+	}
+	return out
+}
+
 // BuildSentenceObjects converts parsed chapters into the nested sentence-object
 // structure. Returns the chapters (whose sentences are pointers) and a flat
-// slice of every sentence, so translation can fill them in place. Per-paragraph
-// roles are carried into Chapter.ParagraphStyles (index-aligned with the kept
-// paragraphs); scene breaks are kept as empty paragraphs that carry their role.
-func BuildSentenceObjects(chapters []ParsedChapter) ([]tbook.Chapter, []*tbook.Sentence) {
-	seg := sentencizer.NewSegmenter("en")
+// slice of every sentence — body prose, figure captions, and table cells — so
+// translation can fill them in place. Per-paragraph roles are carried into
+// Chapter.ParagraphStyles (index-aligned with the kept paragraphs); scene
+// breaks, figures, and tables are kept even when they carry no sentences.
+// sourceLang selects the sentence-splitting rules.
+func BuildSentenceObjects(chapters []ParsedChapter, sourceLang string) ([]tbook.Chapter, []*tbook.Sentence) {
+	seg := NewSegmenter(sourceLang)
 	out := make([]tbook.Chapter, 0, len(chapters))
 	var all []*tbook.Sentence
 
 	for _, ch := range chapters {
 		var paras [][]*tbook.Sentence
 		var styles []string
+		var figures []tbook.Figure
+		var tables []tbook.Table
 		for _, para := range ch.Paragraphs {
-			if para.Role == tbook.RoleSceneBreak {
+			switch para.Role {
+			case tbook.RoleSceneBreak:
 				paras = append(paras, []*tbook.Sentence{})
 				styles = append(styles, tbook.RoleSceneBreak)
-				continue
-			}
-			var sentObjs []*tbook.Sentence
-			for _, r := range segmentParagraph(para.Text, para.Spans, seg) {
-				obj := &tbook.Sentence{
-					Src:   r.Src,
-					Words: Tokenize(r.Src),
-					Tr:    map[string]tbook.Translation{},
-					Spans: r.Spans,
+			case tbook.RoleFigure:
+				if para.Figure == nil {
+					continue
 				}
-				sentObjs = append(sentObjs, obj)
-				all = append(all, obj)
-			}
-			if len(sentObjs) > 0 {
-				paras = append(paras, sentObjs)
-				styles = append(styles, para.Role)
+				caption := buildSentences(para.Text, para.Spans, para.Marks, seg, &all)
+				if caption == nil {
+					caption = []*tbook.Sentence{}
+				}
+				paras = append(paras, caption)
+				styles = append(styles, tbook.RoleFigure)
+				figures = append(figures, tbook.Figure{
+					Para: len(paras) - 1, Image: para.Figure.Image, Alt: para.Figure.Alt,
+				})
+			case tbook.RoleTable:
+				if para.Table == nil || len(para.Table.Rows) == 0 {
+					continue
+				}
+				rows := make([][]tbook.TableCell, 0, len(para.Table.Rows))
+				for _, prow := range para.Table.Rows {
+					row := make([]tbook.TableCell, 0, len(prow))
+					for _, pc := range prow {
+						cellSents := buildSentences(pc.Text, pc.Spans, pc.Marks, seg, &all)
+						if cellSents == nil {
+							cellSents = []*tbook.Sentence{}
+						}
+						row = append(row, tbook.TableCell{Sentences: cellSents, Header: pc.Header})
+					}
+					rows = append(rows, row)
+				}
+				paras = append(paras, []*tbook.Sentence{})
+				styles = append(styles, tbook.RoleTable)
+				tables = append(tables, tbook.Table{Para: len(paras) - 1, Rows: rows})
+			default:
+				sentObjs := buildSentences(para.Text, para.Spans, para.Marks, seg, &all)
+				if len(sentObjs) > 0 {
+					paras = append(paras, sentObjs)
+					styles = append(styles, para.Role)
+				}
 			}
 		}
-		out = append(out, tbook.Chapter{Title: ch.Title, Paragraphs: paras, ParagraphStyles: styles})
+		out = append(out, tbook.Chapter{
+			Title: ch.Title, Paragraphs: paras, ParagraphStyles: styles,
+			Figures: figures, Tables: tables,
+		})
 	}
 	return out, all
+}
+
+// BuildNotes segments parsed note bodies into final note objects. Returns the
+// id → note map plus two flat sentence slices: content-note sentences and
+// citation sentences (kept separate so a producer can skip translating
+// citations).
+func BuildNotes(notes []ParsedNote, sourceLang string) (map[string]*tbook.Note, []*tbook.Sentence, []*tbook.Sentence) {
+	if len(notes) == 0 {
+		return nil, nil, nil
+	}
+	seg := NewSegmenter(sourceLang)
+	out := make(map[string]*tbook.Note, len(notes))
+	var noteSents, citeSents []*tbook.Sentence
+	for _, pn := range notes {
+		var all []*tbook.Sentence
+		var paras [][]*tbook.Sentence
+		for _, para := range pn.Paragraphs {
+			sentObjs := buildSentences(para.Text, para.Spans, para.Marks, seg, &all)
+			if len(sentObjs) > 0 {
+				paras = append(paras, sentObjs)
+			}
+		}
+		if paras == nil {
+			paras = [][]*tbook.Sentence{}
+		}
+		out[pn.ID] = &tbook.Note{Label: pn.Label, Kind: pn.Kind, Paragraphs: paras}
+		if pn.Kind == tbook.NoteKindCitation {
+			citeSents = append(citeSents, all...)
+		} else {
+			noteSents = append(noteSents, all...)
+		}
+	}
+	return out, noteSents, citeSents
 }
