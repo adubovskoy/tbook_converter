@@ -117,7 +117,7 @@ func Judge(ctx context.Context, jc *Client, cacheDir, source string, targets []s
 				var raw json.RawMessage
 				if err := jc.ChatJSON(gctx, sys, string(userJSON), &raw); err != nil {
 					_ = bar.Add(1)
-					return nil // left unjudged; reported below
+					return abortOnly(err) // usage limit aborts; else left unjudged, reported below
 				}
 				out := parseVerdicts(raw)
 				for id, v := range out {
@@ -131,8 +131,11 @@ func Judge(ctx context.Context, jc *Client, cacheDir, source string, targets []s
 				return nil
 			})
 		}
-		_ = g.Wait()
+		gerr := g.Wait()
 		_ = bar.Finish()
+		if gerr != nil {
+			return rep, gerr
+		}
 		if err := ctx.Err(); err != nil {
 			return rep, err
 		}

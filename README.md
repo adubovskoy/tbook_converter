@@ -1,12 +1,16 @@
-# EPUB → `.tbook` converter (Go)
+# EPUB/FB2 → `.tbook` converter (Go)
 
-A single self-contained Go binary that turns a standard `.epub` into a
-**`.tbook`** archive for the [Reader app](../android): every sentence gets a
-translation **and word-level alignment**, so the app shows the full-sentence
-translation with the tapped word highlighted — fully offline.
+A single self-contained Go binary that turns a standard `.epub` (or `.fb2` /
+`.fb2.zip`) into a **`.tbook`** archive for the [Reader app](../android): every
+sentence gets a translation **and word-level alignment**, so the app shows the
+full-sentence translation with the tapped word highlighted — fully offline.
 
-It does the whole job — **parse → translate → assemble → validate** — calling
-**OpenRouter** for translation (any model; no Anthropic). The translation cache
+It does the whole job — **parse → translate → assemble → validate** — with two
+translation backends: **OpenRouter** (metered API, any model) or
+**`--provider claude`**, which shells out to the `claude` CLI in print mode so
+every batch runs on your logged-in **Claude subscription** — no API key, no
+per-token billing (it consumes the subscription's usage windows instead; on a
+limit the run stops with the reset time and resumes from cache). The translation cache
 is resumable, so interrupted runs continue where they left off and adding a
 language only translates the new one. It preserves source formatting and
 content — per-paragraph roles (subtitles, scene breaks), inline italic/bold,
@@ -27,12 +31,17 @@ go build -o convert ./cmd/convert
 
 ```bash
 cp .env.example .env
-# edit .env: set OPENROUTER_API_KEY, pick MODEL, etc.
+# OpenRouter backend: set OPENROUTER_API_KEY, pick MODEL.
+# Claude backend: nothing to configure — just a logged-in `claude` CLI.
 ```
 
-Get a key at <https://openrouter.ai/keys>. The default model is
+For OpenRouter, get a key at <https://openrouter.ai/keys>; the default model is
 `google/gemini-2.5-flash` (fast, cheap, reliable JSON); alternatives are listed
-(commented) in `.env.example`.
+(commented) in `.env.example`. For `--provider claude` the default model is
+`claude-haiku-4-5` (override with `CLAUDE_MODEL` / `--model`); `.env`'s `MODEL`
+is OpenRouter-only and never leaks into the claude backend, and
+`ANTHROPIC_API_KEY` is stripped from the CLI's environment so runs can only
+bill to the subscription.
 Settings precedence: **command-line flags > shell env > `.env` > defaults**.
 
 ## Use
@@ -41,8 +50,14 @@ Settings precedence: **command-line flags > shell env > `.env` > defaults**.
 # Preview parsing/segmentation only — no API calls, no output:
 ./convert ../robert_shekli-alien_harvest.epub --dry-run
 
-# English → Russian:
+# English → Russian via OpenRouter:
 ./convert ../robert_shekli-alien_harvest.epub -o sample.tbook
+
+# The same on your Claude subscription (no API key), with the quality loop:
+./convert book.epub --provider claude --judge --escalate-model claude-sonnet-4-6 -o book.tbook
+
+# FB2 input works the same way:
+./convert book.fb2 --provider claude -o book.tbook
 
 # Multiple target languages in one file (hub-and-spoke; source is the pivot):
 ./convert book.epub -t ru,de,es -o book.tbook
@@ -53,9 +68,14 @@ Settings precedence: **command-line flags > shell env > `.env` > defaults**.
 ```
 
 Flags: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
-`--model`, `--cache-dir` (default `.tbook_cache`), `--batch-size`,
-`--concurrency`, `--max-retries`, `--limit-chapters N`, `--dry-run`,
-`--force` (re-translate, ignoring cache), `-v`.
+`--provider` (`openrouter`|`claude`), `--model`, `--cache-dir` (default
+`.tbook_cache`), `--batch-size`, `--concurrency`, `--max-retries`,
+`--limit-chapters N`, `--dry-run`, `--force` (re-translate, ignoring cache),
+`-v`.
+
+FB2 scope: metadata, cover, sections as chapters (headings, subtitles, scene
+breaks) and inline emphasis; FB2 note bodies, poems, epigraphs and images are
+skipped (EPUB input supports all of those).
 
 Input may be an `.epub` (fresh conversion) **or** an existing `.tbook` (adds the
 `--target` language(s); `--source` and existing translations come from the file,
@@ -209,9 +229,10 @@ cmd/driftdemo      microscope: pipeline + lexcheck + judge on a small passage
 cmd/lexeval        lexcheck benchmark (synthetic drift injection on a .tbook)
 internal/config    .env + flag resolution
 internal/epub      EPUB → chapters of paragraph text
+internal/fb2       FB2/FB2.zip → the same parsed-book structure
 internal/segment   sentence segmentation + word tokenization (rune offsets)
 internal/align     model chunks → highlight spans located in the raw translation
 internal/cache     resumable on-disk translation cache (sha256-keyed)
-internal/translate OpenRouter client, prompt, batching/retry pipeline
+internal/translate LLM clients (OpenRouter HTTP, claude CLI), prompts, batching/retry pipeline
 internal/tbook     data model, ZIP assembly, validation
 ```

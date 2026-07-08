@@ -8,7 +8,8 @@ require (
 	github.com/schollz/progressbar/v3 v3.19.0
 	github.com/sentencizer/sentencizer v0.2.0
 	golang.org/x/net v0.56.0
-	golang.org/x/sync v0.10.0
+	golang.org/x/sync v0.21.0
+	golang.org/x/text v0.38.0
 )
 
 require (

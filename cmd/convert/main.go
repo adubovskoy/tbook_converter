@@ -1,8 +1,10 @@
-// Command convert turns an EPUB into a .tbook language-learning archive,
-// translating every sentence via OpenRouter with word-level alignment.
+// Command convert turns an EPUB or FB2 into a .tbook language-learning
+// archive, translating every sentence with word-level alignment via OpenRouter
+// (metered) or the claude CLI (the user's Claude subscription).
 //
 //	convert book.epub -o book.tbook            # English → Russian (default)
-//	convert book.epub -t ru,de -o book.tbook   # multiple target languages
+//	convert book.epub --provider claude        # translate on the Claude subscription
+//	convert book.fb2 -t ru,de -o book.tbook    # FB2 input, multiple targets
 //	convert book.epub --dry-run                # parse + segment only, no API
 //	convert book.epub --glossary --judge       # quality passes (see README)
 package main
@@ -14,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
 	"strings"
@@ -22,6 +25,7 @@ import (
 	"github.com/dimando/reader/converter/internal/cache"
 	"github.com/dimando/reader/converter/internal/config"
 	"github.com/dimando/reader/converter/internal/epub"
+	"github.com/dimando/reader/converter/internal/fb2"
 	"github.com/dimando/reader/converter/internal/lexcheck"
 	"github.com/dimando/reader/converter/internal/segment"
 	"github.com/dimando/reader/converter/internal/tbook"
@@ -93,14 +97,23 @@ func run() error {
 			title, author, len(outChapters), len(images), len(notes), rb.Targets, cfg.Targets)
 	} else {
 		fmt.Printf("Parsing %s ...\n", cfg.Input)
-		book, err := epub.ParseOpts(cfg.Input, epub.Options{
-			SkipMatter: !cfg.KeepMatter,
-			SkipExtra:  cfg.SkipFiles,
-			NoImages:   cfg.NoImages,
-			NoNotes:    cfg.NoNotes,
-		})
-		if err != nil {
-			return fmt.Errorf("parse epub: %w", err)
+		var book *epub.Book
+		if lower := strings.ToLower(cfg.Input); strings.HasSuffix(lower, ".fb2") ||
+			strings.HasSuffix(lower, ".fb2.zip") {
+			book, err = fb2.Parse(cfg.Input)
+			if err != nil {
+				return fmt.Errorf("parse fb2: %w", err)
+			}
+		} else {
+			book, err = epub.ParseOpts(cfg.Input, epub.Options{
+				SkipMatter: !cfg.KeepMatter,
+				SkipExtra:  cfg.SkipFiles,
+				NoImages:   cfg.NoImages,
+				NoNotes:    cfg.NoNotes,
+			})
+			if err != nil {
+				return fmt.Errorf("parse epub: %w", err)
+			}
 		}
 		chapters := book.Chapters
 		if cfg.LimitChapters > 0 && cfg.LimitChapters < len(chapters) {
@@ -144,17 +157,26 @@ func run() error {
 	cacheModel := cfg.Model
 	var glossary []translate.GlossEntry
 
-	// Only the untranslated work needs the API; a fully-cached run assembles
-	// offline (resume / re-assemble) without a key.
+	// Only the untranslated work needs the LLM; a fully-cached run assembles
+	// offline (resume / re-assemble) without a key or CLI.
 	countPending := func() int {
 		return translate.CountPending(translatable, cfg.Targets, cfg.CacheDir, cfg.Source, cacheModel, cfg.Force)
 	}
 	needAPI := countPending() > 0 || cfg.Glossary || cfg.Judge
 	var client *translate.Client
 	if needAPI {
-		if cfg.APIKey == "" && countPending() > 0 {
-			return fmt.Errorf("%d sentences need translating but OPENROUTER_API_KEY is not set "+
-				"(put it in converter/.env — see .env.example)", countPending())
+		switch cfg.Provider {
+		case config.ProviderClaude:
+			if _, err := exec.LookPath(cfg.ClaudeBin); err != nil {
+				return fmt.Errorf("--provider claude needs the Claude Code CLI (%q not found in PATH); "+
+					"install it or set CLAUDE_BIN", cfg.ClaudeBin)
+			}
+		default:
+			if cfg.APIKey == "" && countPending() > 0 {
+				return fmt.Errorf("%d sentences need translating but OPENROUTER_API_KEY is not set "+
+					"(put it in converter/.env — see .env.example — or use --provider claude "+
+					"to run on your Claude subscription)", countPending())
+			}
 		}
 		client = translate.NewClient(clientOptions(cfg, cfg.Model, cfg.Temperature))
 	}
@@ -176,13 +198,17 @@ func run() error {
 	}
 
 	if pending := countPending(); pending > 0 {
-		fmt.Printf("Translating %s→%s via %s ...\n", cfg.Source, strings.Join(cfg.Targets, ","), cfg.Model)
+		via := cfg.Model
+		if cfg.Provider == config.ProviderClaude {
+			via = "claude CLI (subscription) / " + cfg.Model
+		}
+		fmt.Printf("Translating %s→%s via %s ...\n", cfg.Source, strings.Join(cfg.Targets, ","), via)
 		pipe := &translate.Pipeline{
 			Client: client, CacheDir: cfg.CacheDir, Source: cfg.Source,
 			BatchSize: cfg.BatchSize, AlignBatch: cfg.AlignBatch,
 			Concurrency: cfg.Concurrency,
-			Force:    cfg.Force,
-			Glossary: glossary, CacheModel: cacheModel,
+			Force:       cfg.Force,
+			Glossary:    glossary, CacheModel: cacheModel,
 		}
 		if err := pipe.Run(ctx, translatable, cfg.Targets); err != nil {
 			return err
@@ -272,11 +298,12 @@ func run() error {
 	return nil
 }
 
-// clientOptions builds the OpenRouter client options shared by every pass
-// (translate, escalate, judge), including provider routing. model and
+// clientOptions builds the LLM client options shared by every pass
+// (translate, escalate, judge), including the backend selection. model and
 // temperature vary per pass; everything else comes from the config.
 func clientOptions(cfg *config.Config, model string, temperature float64) translate.Options {
 	return translate.Options{
+		Provider: cfg.Provider, ClaudeBin: cfg.ClaudeBin,
 		BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: model,
 		Referer: cfg.Referer, Title: cfg.Title,
 		Temperature: temperature, JSONMode: cfg.JSONMode,
@@ -381,8 +408,8 @@ func escalateRun(ctx context.Context, cfg *config.Config, glossary []translate.G
 		Client: ec, CacheDir: cfg.CacheDir, Source: cfg.Source,
 		BatchSize: cfg.BatchSize, AlignBatch: cfg.AlignBatch,
 		Concurrency: cfg.Concurrency,
-		Force:    true, // redo even though (bad) entries are cached
-		Glossary: glossary, CacheModel: cacheModel,
+		Force:       true, // redo even though (bad) entries are cached
+		Glossary:    glossary, CacheModel: cacheModel,
 	}
 	if err := pipe.Run(ctx, subset, cfg.Targets); err != nil {
 		return err

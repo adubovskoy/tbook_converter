@@ -2,10 +2,12 @@ package translate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/dimando/reader/converter/internal/align"
 	"github.com/dimando/reader/converter/internal/cache"
@@ -35,6 +37,16 @@ type Pipeline struct {
 	// glossary translations never mix with plain ones in the cache.
 	Glossary   []GlossEntry
 	CacheModel string // cache-key model component; empty = Client model
+
+	mu      sync.Mutex
+	lastErr error // most recent batch failure, for the leftovers warning
+}
+
+// noteErr records a batch failure so the "sentences left" warning can say why.
+func (p *Pipeline) noteErr(err error) {
+	p.mu.Lock()
+	p.lastErr = err
+	p.mu.Unlock()
 }
 
 // cacheModel is the model string used in cache keys. CacheKeyModel builds the
@@ -208,7 +220,9 @@ func (p *Pipeline) runPhase(ctx context.Context, system string, items []item, ta
 			fmt.Printf("[%s] retrying %d sentences (%s, round %d/%d)\n",
 				target, len(remaining), ph, round+1, maxRounds)
 		}
-		p.phaseBatches(ctx, system, remaining, target, ph)
+		if err := p.phaseBatches(ctx, system, remaining, target, ph); err != nil {
+			return err
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -225,7 +239,13 @@ func (p *Pipeline) runPhase(ctx context.Context, system string, items []item, ta
 		remaining = still
 	}
 	if len(remaining) > 0 {
-		fmt.Printf("[%s] WARNING: %d sentences left at phase %s\n", target, len(remaining), ph)
+		why := ""
+		p.mu.Lock()
+		if p.lastErr != nil {
+			why = fmt.Sprintf(" (last error: %v)", p.lastErr)
+		}
+		p.mu.Unlock()
+		fmt.Printf("[%s] WARNING: %d sentences left at phase %s%s\n", target, len(remaining), ph, why)
 	}
 	return nil
 }
@@ -243,8 +263,11 @@ func (p *Pipeline) batchSizeFor(ph phase) int {
 	return p.BatchSize
 }
 
-// phaseBatches splits items into batches and runs them concurrently.
-func (p *Pipeline) phaseBatches(ctx context.Context, system string, items []item, target string, ph phase) {
+// phaseBatches splits items into batches and runs them concurrently. Batch
+// failures are left for the next round — except a subscription usage limit,
+// which cancels the remaining batches and aborts the run (waiting out a
+// multi-hour window inside the process helps nobody; the cache resumes).
+func (p *Pipeline) phaseBatches(ctx context.Context, system string, items []item, target string, ph phase) error {
 	size := p.batchSizeFor(ph)
 	var batches [][]item
 	for i := 0; i < len(items); i += size {
@@ -257,16 +280,20 @@ func (p *Pipeline) phaseBatches(ctx context.Context, system string, items []item
 	g.SetLimit(max(1, p.Concurrency))
 	for _, batch := range batches {
 		g.Go(func() error {
-			p.doBatch(ctx, system, batch, target, ph) // failures left for the next round
+			err := p.doBatch(ctx, system, batch, target, ph)
 			_ = bar.Add(1)
-			return nil
+			return err
 		})
 	}
-	_ = g.Wait()
+	err := g.Wait()
 	_ = bar.Finish()
+	return err
 }
 
-func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, target string, ph phase) {
+// doBatch runs one batch. Its returned error is non-nil ONLY for failures that
+// must abort the run (usage limit) — ordinary batch failures return nil and
+// are retried by the round loop.
+func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, target string, ph phase) error {
 	model := p.cacheModel()
 	byKey := make(map[string]*tbook.Sentence, len(batch))
 	for _, it := range batch {
@@ -280,11 +307,12 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 		}
 		userJSON, err := jsonx.Marshal(inputs)
 		if err != nil {
-			return
+			return nil
 		}
 		out, err := p.Client.TranslateText(ctx, system, string(userJSON))
 		if err != nil {
-			return
+			p.noteErr(err)
+			return abortOnly(err)
 		}
 		for id, text := range out {
 			s, ok := byKey[id]
@@ -302,7 +330,7 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 			// escalated sentences used to ship with the old model's content).
 			cache.Remove(p.CacheDir, id)
 		}
-		return
+		return nil
 	}
 
 	// align phase
@@ -314,11 +342,12 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 	}
 	userJSON, err := jsonx.Marshal(inputs)
 	if err != nil {
-		return
+		return nil
 	}
 	out, err := p.Client.Translate(ctx, system, string(userJSON))
 	if err != nil {
-		return
+		p.noteErr(err)
+		return abortOnly(err)
 	}
 	rawByKey := make(map[string]string, len(batch))
 	for i, it := range batch {
@@ -340,6 +369,21 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 		}
 		_ = cache.Write(p.CacheDir, id, tr)
 	}
+	return nil
+}
+
+// abortOnly keeps only the errors that must abort the whole run: a
+// subscription usage limit, or a permanent CLI failure (bad model, logged
+// out) that would fail every remaining batch identically. Anything else is an
+// ordinary batch failure the round loop retries, reported as nil.
+func abortOnly(err error) error {
+	if _, ok := errors.AsType[*UsageLimitError](err); ok {
+		return err
+	}
+	if ce, ok := errors.AsType[*cliError](err); ok && ce.perm {
+		return err
+	}
+	return nil
 }
 
 // listPrefixRE matches a leading list marker ("1. ", "12) ") in a source

@@ -19,6 +19,12 @@ type Config struct {
 	Input string // positional EPUB path
 	Out   string
 
+	// Provider selects the LLM backend: "openrouter" (metered HTTP API,
+	// needs OPENROUTER_API_KEY) or "claude" (the `claude` CLI in print mode —
+	// runs on the user's Claude subscription, no API key, no per-token cost).
+	Provider  string
+	ClaudeBin string // claude CLI path; "" = "claude" from $PATH
+
 	APIKey  string
 	BaseURL string
 	Model   string
@@ -74,8 +80,9 @@ func Load(args []string) (*Config, error) {
 
 	fs := flag.NewFlagSet("convert", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: convert <book.epub|book.tbook> -o <book.tbook> [flags]\n\n"+
-			"Translate an EPUB into a .tbook archive via OpenRouter, or add a target\n"+
+		fmt.Fprintf(fs.Output(), "Usage: convert <book.epub|book.fb2|book.tbook> -o <book.tbook> [flags]\n\n"+
+			"Translate an EPUB or FB2 into a .tbook archive — via OpenRouter (metered) or\n"+
+			"the claude CLI on your Claude subscription (--provider claude) — or add a target\n"+
 			"language to an existing .tbook (given as input; existing translations kept).\n"+
 			"Configuration is read from .env (see .env.example), overridable by these flags.\n\nFlags:\n")
 		fs.PrintDefaults()
@@ -93,7 +100,10 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&targetShort, "t", "", "shorthand for --target")
 	fs.StringVar(&source, "source", envOr("SOURCE_LANG", "en"), "source language code")
 	fs.StringVar(&sourceShort, "s", "", "shorthand for --source")
-	model := fs.String("model", envOr("MODEL", "google/gemini-2.5-flash"), "OpenRouter model id")
+	provider := fs.String("provider", envOr("PROVIDER", "openrouter"),
+		"LLM backend: openrouter (metered API) | claude (claude CLI on your Claude subscription; no API key)")
+	model := fs.String("model", "",
+		"model id (default: MODEL env or "+defaultOpenRouterModel+" for openrouter; CLAUDE_MODEL env or "+defaultClaudeModel+" for claude)")
 	cacheDir := fs.String("cache-dir", envOr("CACHE_DIR", ".tbook_cache"), "translation cache directory")
 	batchSize := fs.Int("batch-size", envInt("BATCH_SIZE", 16), "sentences per API request")
 	alignBatch := fs.Int("align-batch", envInt("ALIGN_BATCH", 0), "sentences per ALIGN request (0 = batch-size/4; small align batches curb positional drift)")
@@ -146,34 +156,36 @@ func Load(args []string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Input:         input,
-		Out:           pick(outShort, out),
-		APIKey:        os.Getenv("OPENROUTER_API_KEY"),
-		BaseURL:       strings.TrimRight(envOr("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"), "/"),
-		Model:         *model,
-		Referer:       os.Getenv("OPENROUTER_HTTP_REFERER"),
-		Title:         envOr("OPENROUTER_X_TITLE", "reader-tbook-converter"),
-		ProviderSort:  *providerSort,
-		ProviderOrder: splitCodes(*providerOrder),
-		Source:        pick(sourceShort, source),
-		Targets:       splitCodes(pick(targetShort, target)),
-		BatchSize:     *batchSize,
-		AlignBatch:    *alignBatch,
-		Concurrency:   *concurrency,
-		MaxRetries:    *maxRetries,
-		Temperature:   envFloat("TEMPERATURE", 0.3),
-		Timeout:       time.Duration(envInt("REQUEST_TIMEOUT_SEC", 120)) * time.Second,
-		JSONMode:      envBool("USE_JSON_MODE", true),
-		CacheDir:      *cacheDir,
-		LimitChapters: *limit,
-		DryRun:        *dryRun,
-		Force:         *force,
-		Verbose:       verbose || verboseSh,
-		KeepMatter:    *keepMatter,
-		SkipFiles:     splitCodes(*skipFiles),
-		NoImages:      *noImages,
-		NoNotes:       *noNotes,
-		SkipCitations: *skipCitations,
+		Input:           input,
+		Out:             pick(outShort, out),
+		Provider:        strings.ToLower(strings.TrimSpace(*provider)),
+		ClaudeBin:       envOr("CLAUDE_BIN", "claude"),
+		APIKey:          os.Getenv("OPENROUTER_API_KEY"),
+		BaseURL:         strings.TrimRight(envOr("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"), "/"),
+		Model:           *model,
+		Referer:         os.Getenv("OPENROUTER_HTTP_REFERER"),
+		Title:           envOr("OPENROUTER_X_TITLE", "reader-tbook-converter"),
+		ProviderSort:    *providerSort,
+		ProviderOrder:   splitCodes(*providerOrder),
+		Source:          pick(sourceShort, source),
+		Targets:         splitCodes(pick(targetShort, target)),
+		BatchSize:       *batchSize,
+		AlignBatch:      *alignBatch,
+		Concurrency:     *concurrency,
+		MaxRetries:      *maxRetries,
+		Temperature:     envFloat("TEMPERATURE", 0.3),
+		Timeout:         time.Duration(envInt("REQUEST_TIMEOUT_SEC", 120)) * time.Second,
+		JSONMode:        envBool("USE_JSON_MODE", true),
+		CacheDir:        *cacheDir,
+		LimitChapters:   *limit,
+		DryRun:          *dryRun,
+		Force:           *force,
+		Verbose:         verbose || verboseSh,
+		KeepMatter:      *keepMatter,
+		SkipFiles:       splitCodes(*skipFiles),
+		NoImages:        *noImages,
+		NoNotes:         *noNotes,
+		SkipCitations:   *skipCitations,
 		Glossary:        *glossary,
 		Judge:           *judge,
 		JudgeModel:      *judgeModel,
@@ -181,7 +193,36 @@ func Load(args []string) (*Config, error) {
 		EscalateModel:   *escalateModel,
 		Lexcheck:        !*noLexcheck,
 		LexiconDir:      *lexiconDir,
-		Invalidate:    *invalidate,
+		Invalidate:      *invalidate,
+	}
+	if cfg.Provider != ProviderOpenRouter && cfg.Provider != ProviderClaude {
+		return nil, fmt.Errorf("unknown --provider %q (want openrouter or claude)", cfg.Provider)
+	}
+	// The model default follows the provider, each with its own env var — the
+	// MODEL in .env is an OpenRouter id and must never leak into the claude
+	// CLI (which would fail every call on an unknown model).
+	if cfg.Model == "" {
+		if cfg.Provider == ProviderClaude {
+			cfg.Model = envOr("CLAUDE_MODEL", defaultClaudeModel)
+		} else {
+			cfg.Model = envOr("MODEL", defaultOpenRouterModel)
+		}
+	}
+	// A claude CLI call carries process-startup overhead on top of generation;
+	// give it a roomier default timeout (explicit REQUEST_TIMEOUT_SEC still wins).
+	if cfg.Provider == ProviderClaude && os.Getenv("REQUEST_TIMEOUT_SEC") == "" {
+		cfg.Timeout = 300 * time.Second
+	}
+	// OpenRouter ids carry a vendor prefix ("google/…"); Claude model ids never
+	// do. Under the claude provider, drop such leftovers from .env rather than
+	// failing every judge/escalate call on an unknown model.
+	if cfg.Provider == ProviderClaude {
+		if strings.Contains(cfg.JudgeModel, "/") {
+			cfg.JudgeModel = ""
+		}
+		if strings.Contains(cfg.EscalateModel, "/") {
+			cfg.EscalateModel = ""
+		}
 	}
 	// Default judge = translate model. Measured (see README): a stronger judge
 	// keeps full drift recall but flags 50-70% of sentences on style pedantry —
@@ -198,11 +239,11 @@ func Load(args []string) (*Config, error) {
 	}
 	if cfg.Out == "" && cfg.Input != "" {
 		// A .tbook input is the add-a-language path: default to overwriting it
-		// in place (adding the new target). An .epub input maps to a sibling .tbook.
+		// in place (adding the new target). A book input maps to a sibling .tbook.
 		if strings.HasSuffix(cfg.Input, ".tbook") {
 			cfg.Out = cfg.Input
 		} else {
-			cfg.Out = strings.TrimSuffix(cfg.Input, ".epub") + ".tbook"
+			cfg.Out = trimBookExt(cfg.Input) + ".tbook"
 		}
 	}
 	if len(cfg.Targets) == 0 {
@@ -215,6 +256,31 @@ func Load(args []string) (*Config, error) {
 		cfg.Concurrency = 1
 	}
 	return cfg, nil
+}
+
+// LLM backends (mirrored in internal/translate; kept as plain strings here to
+// avoid an import cycle risk — config is a leaf).
+const (
+	ProviderOpenRouter = "openrouter"
+	ProviderClaude     = "claude"
+)
+
+// Per-provider model defaults.
+const (
+	defaultOpenRouterModel = "google/gemini-2.5-flash"
+	defaultClaudeModel     = "claude-haiku-4-5"
+)
+
+// trimBookExt strips a known book extension (case-insensitive) so the default
+// output lands next to the input as <name>.tbook.
+func trimBookExt(path string) string {
+	lower := strings.ToLower(path)
+	for _, ext := range []string{".fb2.zip", ".fb2", ".epub"} {
+		if strings.HasSuffix(lower, ext) {
+			return path[:len(path)-len(ext)]
+		}
+	}
+	return path
 }
 
 // pick returns the first non-empty value (used for short/long flag aliases).
