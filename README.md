@@ -46,6 +46,10 @@ Settings precedence: **command-line flags > shell env > `.env` > defaults**.
 
 # Multiple target languages in one file (hub-and-spoke; source is the pivot):
 ./convert book.epub -t ru,de,es -o book.tbook
+
+# Add a language to an EXISTING .tbook — no source EPUB needed. Existing
+# translations are kept; only the new target is translated. Overwrites in place:
+./convert book.tbook -t en
 ```
 
 Flags: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
@@ -53,15 +57,24 @@ Flags: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
 `--concurrency`, `--max-retries`, `--limit-chapters N`, `--dry-run`,
 `--force` (re-translate, ignoring cache), `-v`.
 
+Input may be an `.epub` (fresh conversion) **or** an existing `.tbook` (adds the
+`--target` language(s); `--source` and existing translations come from the file,
+default output overwrites it in place).
+
+Provider routing (OpenRouter): `--provider-sort throughput|latency|price` and
+`--provider-order slug1,slug2` (e.g. `alibaba`). For **bulk** runs prefer the
+default routing or `latency` — `throughput` pins the single fastest-tok/s
+provider and serializes concurrency (measurably slower for a whole book).
+
 Content flags: `--keep-matter` (don't skip cover/synopsis/credits/index),
 `--skip-files pat1,pat2` (extra title/filename patterns to skip), `--no-images`,
 `--no-notes`, `--skip-citations` (keep citation-kind footnotes untranslated —
 bibliographic references have little learner value and cost tokens).
 
 Quality flags: `--glossary` (one extra call builds a book glossary — recurring
-terms + proper nouns — enforced in every translate batch for consistency),
-`--lexcheck` (free static drift check against a bilingual dictionary, see
-below), `--judge` (semantic verification pass, see below), `--judge-model`,
+terms + proper nouns — enforced in every translate batch for consistency), the
+free static drift check (see below) runs **by default** — `--no-lexcheck`
+disables it, `--judge` (semantic verification pass, see below), `--judge-model`,
 `--judge-invalidate`, `--escalate-model`. Run `./convert --help` for the full
 list.
 

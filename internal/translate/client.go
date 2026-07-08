@@ -26,6 +26,14 @@ type Options struct {
 	JSONMode    bool
 	MaxRetries  int
 	Timeout     time.Duration
+
+	// ProviderSort biases OpenRouter provider routing: "throughput" (fastest
+	// tokens/sec), "latency" (lowest time-to-first-token), or "price". Empty
+	// leaves OpenRouter's default routing. ProviderOrder pins specific provider
+	// slugs (e.g. "alibaba") in priority order. See
+	// https://openrouter.ai/docs/features/provider-routing.
+	ProviderSort  string
+	ProviderOrder []string
 }
 
 // Client calls the OpenRouter chat-completions API with retry/backoff.
@@ -49,10 +57,19 @@ type chatRequest struct {
 	Messages       []message       `json:"messages"`
 	Temperature    float64         `json:"temperature"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	Provider       *providerPrefs  `json:"provider,omitempty"`
 }
 
 type responseFormat struct {
 	Type string `json:"type"`
+}
+
+// providerPrefs is OpenRouter's provider-routing preference object. Sort orders
+// candidate providers ("throughput"|"latency"|"price"); Order pins providers by
+// slug. Both omitted ⇒ field absent ⇒ default routing.
+type providerPrefs struct {
+	Sort  string   `json:"sort,omitempty"`
+	Order []string `json:"order,omitempty"`
 }
 
 type chatResponse struct {
@@ -94,6 +111,9 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 	}
 	if c.opts.JSONMode {
 		req.ResponseFormat = &responseFormat{Type: "json_object"}
+	}
+	if c.opts.ProviderSort != "" || len(c.opts.ProviderOrder) > 0 {
+		req.Provider = &providerPrefs{Sort: c.opts.ProviderSort, Order: c.opts.ProviderOrder}
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {

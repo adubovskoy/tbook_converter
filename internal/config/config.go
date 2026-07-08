@@ -25,6 +25,10 @@ type Config struct {
 	Referer string
 	Title   string
 
+	// OpenRouter provider routing (see internal/translate.Options).
+	ProviderSort  string   // "throughput" | "latency" | "price" | "" (default routing)
+	ProviderOrder []string // pin providers by slug, priority order
+
 	Source  string
 	Targets []string
 
@@ -70,8 +74,9 @@ func Load(args []string) (*Config, error) {
 
 	fs := flag.NewFlagSet("convert", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: convert <book.epub> -o <book.tbook> [flags]\n\n"+
-			"Translate an EPUB into a .tbook archive via OpenRouter.\n"+
+		fmt.Fprintf(fs.Output(), "Usage: convert <book.epub|book.tbook> -o <book.tbook> [flags]\n\n"+
+			"Translate an EPUB into a .tbook archive via OpenRouter, or add a target\n"+
+			"language to an existing .tbook (given as input; existing translations kept).\n"+
 			"Configuration is read from .env (see .env.example), overridable by these flags.\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
@@ -109,8 +114,13 @@ func Load(args []string) (*Config, error) {
 	judgeModel := fs.String("judge-model", envOr("JUDGE_MODEL", ""), "model for the judge pass (default: same as --model; see README before pointing it at a stronger model)")
 	judgeInvalidate := fs.Bool("judge-invalidate", false, "with --judge: immediately clear cache for flagged sentences so the next run redoes them")
 	escalateModel := fs.String("escalate-model", envOr("ESCALATE_MODEL", ""), "with --judge/--lexcheck: immediately redo flagged sentences with this stronger model (kept in the primary cache namespace)")
-	lexcheckFlag := fs.Bool("lexcheck", false, "static drift check against a bilingual lexicon (see tools/fetch-lexicons.sh); flags feed --escalate-model")
-	lexiconDir := fs.String("lexicons", envOr("LEXICON_DIR", "lexicons"), "lexicon directory for --lexcheck")
+	// Lexcheck is free (offline) and runs by default; --no-lexcheck opts out.
+	// --lexcheck is kept as an accepted no-op for backward compatibility.
+	_ = fs.Bool("lexcheck", true, "(default; deprecated) static lexicon drift check — on unless --no-lexcheck")
+	noLexcheck := fs.Bool("no-lexcheck", envBool("NO_LEXCHECK", false), "disable the default static lexicon drift check")
+	lexiconDir := fs.String("lexicons", envOr("LEXICON_DIR", "lexicons"), "lexicon directory for the drift check")
+	providerSort := fs.String("provider-sort", envOr("PROVIDER_SORT", ""), "OpenRouter provider routing: throughput (fastest tokens/sec) | latency | price (empty = default routing)")
+	providerOrder := fs.String("provider-order", envOr("PROVIDER_ORDER", ""), "pin OpenRouter providers by slug, comma-separated in priority order (e.g. alibaba)")
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
 	fs.BoolVar(&verboseSh, "v", false, "shorthand for --verbose")
 
@@ -143,6 +153,8 @@ func Load(args []string) (*Config, error) {
 		Model:         *model,
 		Referer:       os.Getenv("OPENROUTER_HTTP_REFERER"),
 		Title:         envOr("OPENROUTER_X_TITLE", "reader-tbook-converter"),
+		ProviderSort:  *providerSort,
+		ProviderOrder: splitCodes(*providerOrder),
 		Source:        pick(sourceShort, source),
 		Targets:       splitCodes(pick(targetShort, target)),
 		BatchSize:     *batchSize,
@@ -167,7 +179,7 @@ func Load(args []string) (*Config, error) {
 		JudgeModel:      *judgeModel,
 		JudgeInvalidate: *judgeInvalidate,
 		EscalateModel:   *escalateModel,
-		Lexcheck:        *lexcheckFlag,
+		Lexcheck:        !*noLexcheck,
 		LexiconDir:      *lexiconDir,
 		Invalidate:    *invalidate,
 	}
@@ -182,10 +194,16 @@ func Load(args []string) (*Config, error) {
 
 	// --invalidate is a cache-maintenance op; it needs no input EPUB.
 	if cfg.Input == "" && cfg.Invalidate == "" {
-		return nil, fmt.Errorf("missing input .epub (usage: convert <book.epub> -o <book.tbook>)")
+		return nil, fmt.Errorf("missing input .epub/.tbook (usage: convert <book.epub|book.tbook> -o <book.tbook>)")
 	}
 	if cfg.Out == "" && cfg.Input != "" {
-		cfg.Out = strings.TrimSuffix(cfg.Input, ".epub") + ".tbook"
+		// A .tbook input is the add-a-language path: default to overwriting it
+		// in place (adding the new target). An .epub input maps to a sibling .tbook.
+		if strings.HasSuffix(cfg.Input, ".tbook") {
+			cfg.Out = cfg.Input
+		} else {
+			cfg.Out = strings.TrimSuffix(cfg.Input, ".epub") + ".tbook"
+		}
 	}
 	if len(cfg.Targets) == 0 {
 		cfg.Targets = []string{"ru"}

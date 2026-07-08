@@ -57,30 +57,67 @@ func run() error {
 		return nil
 	}
 
-	// Parse + segment (no API).
-	fmt.Printf("Parsing %s ...\n", cfg.Input)
-	book, err := epub.ParseOpts(cfg.Input, epub.Options{
-		SkipMatter: !cfg.KeepMatter,
-		SkipExtra:  cfg.SkipFiles,
-		NoImages:   cfg.NoImages,
-		NoNotes:    cfg.NoNotes,
-	})
-	if err != nil {
-		return fmt.Errorf("parse epub: %w", err)
-	}
-	chapters := book.Chapters
-	if cfg.LimitChapters > 0 && cfg.LimitChapters < len(chapters) {
-		chapters = chapters[:cfg.LimitChapters]
-	}
-	coverState := "no"
-	if book.Cover != nil {
-		coverState = "yes"
-	}
-	fmt.Printf("  %q by %s — %d chapters, cover: %s, %d images, %d notes\n",
-		book.Title, book.Author, len(chapters), coverState, len(book.Images), len(book.Notes))
+	// Load the source book (no API). Two inputs are accepted:
+	//   • an .epub  — parsed + segmented (the fresh-conversion path);
+	//   • a .tbook — read back so a new target language can be added without the
+	//     source EPUB. Existing translations are preserved verbatim; only the
+	//     new target(s) in --target are translated and merged in.
+	var (
+		title, author string
+		cover         []byte
+		images        map[string][]byte
+		notes         map[string]*tbook.Note
+		outChapters   []tbook.Chapter
+		sentences     []*tbook.Sentence // chapter prose + figure captions + table cells
+		noteSents     []*tbook.Sentence
+		citeSents     []*tbook.Sentence
+		writeTargets  []string // final manifest targetLangs
+	)
 
-	outChapters, sentences := segment.BuildSentenceObjects(chapters, cfg.Source)
-	notes, noteSents, citeSents := segment.BuildNotes(book.Notes, cfg.Source)
+	if strings.HasSuffix(cfg.Input, ".tbook") {
+		fmt.Printf("Reading %s ...\n", cfg.Input)
+		rb, err := tbook.Read(cfg.Input)
+		if err != nil {
+			return fmt.Errorf("read tbook: %w", err)
+		}
+		cfg.Source = rb.Source // the archive is authoritative for the source language
+		title, author = rb.Title, rb.Author
+		cover, images, notes = rb.Cover, rb.Images, rb.Notes
+		if cfg.LimitChapters > 0 && cfg.LimitChapters < len(rb.Chapters) {
+			rb.Chapters = rb.Chapters[:cfg.LimitChapters]
+		}
+		outChapters = rb.Chapters
+		sentences, noteSents, citeSents = rb.Sentences()
+		writeTargets = mergeTargets(rb.Targets, cfg.Targets)
+		fmt.Printf("  %q by %s — %d chapters, %d images, %d notes; have %v, adding %v\n",
+			title, author, len(outChapters), len(images), len(notes), rb.Targets, cfg.Targets)
+	} else {
+		fmt.Printf("Parsing %s ...\n", cfg.Input)
+		book, err := epub.ParseOpts(cfg.Input, epub.Options{
+			SkipMatter: !cfg.KeepMatter,
+			SkipExtra:  cfg.SkipFiles,
+			NoImages:   cfg.NoImages,
+			NoNotes:    cfg.NoNotes,
+		})
+		if err != nil {
+			return fmt.Errorf("parse epub: %w", err)
+		}
+		chapters := book.Chapters
+		if cfg.LimitChapters > 0 && cfg.LimitChapters < len(chapters) {
+			chapters = chapters[:cfg.LimitChapters]
+		}
+		coverState := "no"
+		if book.Cover != nil {
+			coverState = "yes"
+		}
+		fmt.Printf("  %q by %s — %d chapters, cover: %s, %d images, %d notes\n",
+			book.Title, book.Author, len(chapters), coverState, len(book.Images), len(book.Notes))
+
+		outChapters, sentences = segment.BuildSentenceObjects(chapters, cfg.Source)
+		notes, noteSents, citeSents = segment.BuildNotes(book.Notes, cfg.Source)
+		title, author, cover, images = book.Title, book.Author, book.Cover, book.Images
+		writeTargets = cfg.Targets
+	}
 
 	// Everything below translates `translatable`; citations join it unless
 	// skipped (untranslated citations are legal — empty tr).
@@ -119,12 +156,7 @@ func run() error {
 			return fmt.Errorf("%d sentences need translating but OPENROUTER_API_KEY is not set "+
 				"(put it in converter/.env — see .env.example)", countPending())
 		}
-		client = translate.NewClient(translate.Options{
-			BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.Model,
-			Referer: cfg.Referer, Title: cfg.Title,
-			Temperature: cfg.Temperature, JSONMode: cfg.JSONMode,
-			MaxRetries: cfg.MaxRetries, Timeout: cfg.Timeout,
-		})
+		client = translate.NewClient(clientOptions(cfg, cfg.Model, cfg.Temperature))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -135,7 +167,7 @@ func run() error {
 	if cfg.Glossary {
 		var ghash string
 		glossary, ghash, err = translate.BuildGlossary(ctx, client, cfg.CacheDir, sentences,
-			cfg.Source, cfg.Targets[0], book.Title, book.Author)
+			cfg.Source, cfg.Targets[0], title, author)
 		if err != nil {
 			return fmt.Errorf("glossary: %w", err)
 		}
@@ -205,9 +237,9 @@ func run() error {
 
 	fmt.Printf("Writing %s ...\n", cfg.Out)
 	out := &tbook.Book{
-		Title: book.Title, Author: book.Author,
-		Source: cfg.Source, Targets: cfg.Targets,
-		Cover: book.Cover, Images: book.Images, Notes: notes,
+		Title: title, Author: author,
+		Source: cfg.Source, Targets: writeTargets,
+		Cover: cover, Images: images, Notes: notes,
 		Chapters: outChapters,
 	}
 	if err := tbook.Write(cfg.Out, out); err != nil {
@@ -217,8 +249,8 @@ func run() error {
 		fmt.Printf("Done. %s (%d KB)\n", cfg.Out, fi.Size()/1024)
 	}
 
-	// Validate.
-	rep := tbook.Validate(out, cfg.Targets)
+	// Validate against the full manifest target set (existing + newly added).
+	rep := tbook.Validate(out, writeTargets)
 	fmt.Printf("Validation: %d sentences, %d empty, %d offset_errors, %d struct_errors — %s\n",
 		rep.Sentences, rep.Empty, rep.OffsetErrors, rep.StructErrors, status(rep))
 	unaligned := ""
@@ -238,6 +270,36 @@ func run() error {
 			rep.OffsetErrors, rep.StructErrors)
 	}
 	return nil
+}
+
+// clientOptions builds the OpenRouter client options shared by every pass
+// (translate, escalate, judge), including provider routing. model and
+// temperature vary per pass; everything else comes from the config.
+func clientOptions(cfg *config.Config, model string, temperature float64) translate.Options {
+	return translate.Options{
+		BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: model,
+		Referer: cfg.Referer, Title: cfg.Title,
+		Temperature: temperature, JSONMode: cfg.JSONMode,
+		MaxRetries: cfg.MaxRetries, Timeout: cfg.Timeout,
+		ProviderSort: cfg.ProviderSort, ProviderOrder: cfg.ProviderOrder,
+	}
+}
+
+// mergeTargets returns the existing target list followed by any requested
+// targets not already present — the final manifest targetLangs when adding a
+// language to an existing .tbook. Order is stable: existing first, then new.
+func mergeTargets(existing, requested []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(existing)+len(requested))
+	for _, group := range [][]string{existing, requested} {
+		for _, t := range group {
+			if t != "" && !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		}
+	}
+	return out
 }
 
 // runLexcheck statically scores every translated sentence against the
@@ -314,12 +376,7 @@ func subsetBySrc(sentences []*tbook.Sentence, srcs []string) []*tbook.Sentence {
 func escalateRun(ctx context.Context, cfg *config.Config, glossary []translate.GlossEntry,
 	cacheModel string, subset []*tbook.Sentence) error {
 
-	ec := translate.NewClient(translate.Options{
-		BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.EscalateModel,
-		Referer: cfg.Referer, Title: cfg.Title,
-		Temperature: cfg.Temperature, JSONMode: cfg.JSONMode,
-		MaxRetries: cfg.MaxRetries, Timeout: cfg.Timeout,
-	})
+	ec := translate.NewClient(clientOptions(cfg, cfg.EscalateModel, cfg.Temperature))
 	pipe := &translate.Pipeline{
 		Client: ec, CacheDir: cfg.CacheDir, Source: cfg.Source,
 		BatchSize: cfg.BatchSize, AlignBatch: cfg.AlignBatch,
@@ -371,12 +428,7 @@ func reverifyEscalated(ctx context.Context, cfg *config.Config, glossary []trans
 			}
 		}
 		if cfg.Judge {
-			jc := translate.NewClient(translate.Options{
-				BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.JudgeModel,
-				Referer: cfg.Referer, Title: cfg.Title,
-				Temperature: 0, JSONMode: cfg.JSONMode,
-				MaxRetries: cfg.MaxRetries, Timeout: cfg.Timeout,
-			})
+			jc := translate.NewClient(clientOptions(cfg, cfg.JudgeModel, 0))
 			rep, err := translate.Judge(ctx, jc, cfg.CacheDir, cfg.Source, cfg.Targets,
 				set, max(1, cfg.BatchSize/2), cfg.Concurrency)
 			if err != nil {
@@ -445,12 +497,7 @@ func reverifyEscalated(ctx context.Context, cfg *config.Config, glossary []trans
 // very next run re-translates them (e.g. with a stronger --model). Returns the
 // flagged source sentences.
 func runJudge(ctx context.Context, cfg *config.Config, sentences []*tbook.Sentence) ([]string, error) {
-	jc := translate.NewClient(translate.Options{
-		BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.JudgeModel,
-		Referer: cfg.Referer, Title: cfg.Title,
-		Temperature: 0, JSONMode: cfg.JSONMode,
-		MaxRetries: cfg.MaxRetries, Timeout: cfg.Timeout,
-	})
+	jc := translate.NewClient(clientOptions(cfg, cfg.JudgeModel, 0))
 	fmt.Printf("Judging translations via %s ...\n", cfg.JudgeModel)
 	// Judge batches are smaller than translate batches: each item carries the
 	// full alignment, and verdict quality drops with oversized prompts.
