@@ -147,6 +147,33 @@ A fully-cached run assembles **offline with no API key** (resume / re-assemble).
    then validate — reporting structural integrity **and alignment coverage** (a
    `<55%` warning flags gross drift / empty alignment).
 
+## Local embedding alignment (`--align-mode`)
+
+Pass 2 can run **locally for free** instead of through the LLM: a SimAlign-style
+aligner (LaBSE token embeddings + mutual argmax, `tools/embalign.py`) matches
+words by semantic similarity, so positional drift is structurally impossible.
+Benchmarked against the LLM align pass it scores *better* on lexcheck (support
+rate 0.710 vs 0.672 en→ru, p≈0.009) at zero token cost — the whole align pass
+for a book runs in minutes on CPU.
+
+```bash
+tools/embalign-setup.sh      # one-time: creates .venv-embalign (CPU torch);
+                             # the first run downloads LaBSE (~1.8 GB)
+
+# Recommended: embedding alignment with an LLM safety net — sentences the free
+# gate rejects (lexcheck flag or coverage < --embalign-q, ~7%) are re-aligned
+# by the LLM align pass:
+./convert book.epub -t ru --align-mode hybrid
+
+# Fully local align pass (no LLM fallback). With a fully translated cache this
+# needs no API key at all — e.g. re-aligning after an align-contract bump:
+./convert book.epub -t ru --align-mode emb
+```
+
+Only en→ru was benchmarked; treat other language pairs as unverified and spot
+check with `--judge` before trusting them. Escalation always uses the LLM
+align pass regardless of mode.
+
 ## Quality & verification
 
 Validation + coverage prove the file is *well-formed and mapped* — they do **not**
@@ -228,6 +255,7 @@ cmd/convert        CLI entrypoint (flags, orchestration, --dry-run)
 cmd/driftdemo      microscope: pipeline + lexcheck + judge on a small passage
 cmd/lexeval        lexcheck benchmark (synthetic drift injection on a .tbook)
 internal/config    .env + flag resolution
+internal/embalign  local embedding word aligner (tools/embalign.py subprocess)
 internal/epub      EPUB → chapters of paragraph text
 internal/fb2       FB2/FB2.zip → the same parsed-book structure
 internal/segment   sentence segmentation + word tokenization (rune offsets)

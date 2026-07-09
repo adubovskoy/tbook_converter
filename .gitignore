@@ -5,3 +5,11 @@
 .env
 .tbook_cache/
 lexicons/
+
+# Local embedding-aligner venv (tools/embalign-setup.sh)
+.venv-embalign/
+
+# Books are test inputs, not sources
+*.epub
+*.fb2
+*.tbook
