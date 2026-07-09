@@ -68,6 +68,17 @@ type Config struct {
 	Lexcheck        bool   // static dictionary-based drift check
 	LexiconDir      string // directory of compact lexicons (tools/fetch-lexicons.sh)
 
+	// Alignment pass. "llm" = LLM align pass (default); "emb" = local embedding
+	// aligner only; "hybrid" = embedding aligner with LLM fallback for gated
+	// sentences (see embalign-report.md and tools/embalign-setup.sh).
+	AlignMode string
+	EmbPython string  // interpreter for tools/embalign.py ("" = auto: EMBALIGN_PYTHON, .venv-embalign, python3)
+	EmbScript string  // aligner script path
+	EmbModel  string  // HF encoder id
+	EmbLayer  int     // hidden layer for token embeddings
+	EmbMethod string  // argmax (precision-first) | itermax (recall-first)
+	EmbQMin   float64 // hybrid gate: coverage threshold below which the LLM re-aligns
+
 	// Invalidate, if set, names a file of source sentences whose cached
 	// translation+alignment should be cleared (verify/QA loop); the run then exits.
 	Invalidate string
@@ -129,6 +140,14 @@ func Load(args []string) (*Config, error) {
 	_ = fs.Bool("lexcheck", true, "(default; deprecated) static lexicon drift check — on unless --no-lexcheck")
 	noLexcheck := fs.Bool("no-lexcheck", envBool("NO_LEXCHECK", false), "disable the default static lexicon drift check")
 	lexiconDir := fs.String("lexicons", envOr("LEXICON_DIR", "lexicons"), "lexicon directory for the drift check")
+	alignMode := fs.String("align-mode", envOr("ALIGN_MODE", AlignLLM),
+		"alignment pass: llm (default) | emb (local embedding aligner, no LLM align) | hybrid (embedding aligner + LLM fallback for gated sentences)")
+	embPython := fs.String("embalign-python", envOr("EMBALIGN_PYTHON", ""), "python for the embedding aligner (default: .venv-embalign/bin/python if present, else python3; see tools/embalign-setup.sh)")
+	embScript := fs.String("embalign-script", envOr("EMBALIGN_SCRIPT", "tools/embalign.py"), "embedding aligner script")
+	embModel := fs.String("embalign-model", envOr("EMBALIGN_MODEL", "sentence-transformers/LaBSE"), "embedding aligner encoder (HF model id)")
+	embLayer := fs.Int("embalign-layer", envInt("EMBALIGN_LAYER", 8), "embedding aligner hidden layer")
+	embMethod := fs.String("embalign-method", envOr("EMBALIGN_METHOD", "argmax"), "embedding aligner matching: argmax (precision-first) | itermax (recall-first)")
+	embQ := fs.Float64("embalign-q", envFloat("EMBALIGN_Q", 0.7), "hybrid gate: alignment-coverage threshold below which the LLM align pass redoes the sentence")
 	providerSort := fs.String("provider-sort", envOr("PROVIDER_SORT", ""), "OpenRouter provider routing: throughput (fastest tokens/sec) | latency | price (empty = default routing)")
 	providerOrder := fs.String("provider-order", envOr("PROVIDER_ORDER", ""), "pin OpenRouter providers by slug, comma-separated in priority order (e.g. alibaba)")
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
@@ -193,10 +212,20 @@ func Load(args []string) (*Config, error) {
 		EscalateModel:   *escalateModel,
 		Lexcheck:        !*noLexcheck,
 		LexiconDir:      *lexiconDir,
+		AlignMode:       strings.ToLower(strings.TrimSpace(*alignMode)),
+		EmbPython:       *embPython,
+		EmbScript:       *embScript,
+		EmbModel:        *embModel,
+		EmbLayer:        *embLayer,
+		EmbMethod:       *embMethod,
+		EmbQMin:         *embQ,
 		Invalidate:      *invalidate,
 	}
 	if cfg.Provider != ProviderOpenRouter && cfg.Provider != ProviderClaude {
 		return nil, fmt.Errorf("unknown --provider %q (want openrouter or claude)", cfg.Provider)
+	}
+	if cfg.AlignMode != AlignLLM && cfg.AlignMode != AlignEmb && cfg.AlignMode != AlignHybrid {
+		return nil, fmt.Errorf("unknown --align-mode %q (want llm, emb or hybrid)", cfg.AlignMode)
 	}
 	// The model default follows the provider, each with its own env var — the
 	// MODEL in .env is an OpenRouter id and must never leak into the claude
@@ -263,6 +292,13 @@ func Load(args []string) (*Config, error) {
 const (
 	ProviderOpenRouter = "openrouter"
 	ProviderClaude     = "claude"
+)
+
+// Alignment-pass modes (mirrored in internal/translate).
+const (
+	AlignLLM    = "llm"
+	AlignEmb    = "emb"
+	AlignHybrid = "hybrid"
 )
 
 // Per-provider model defaults.

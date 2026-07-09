@@ -11,7 +11,10 @@ import (
 
 	"github.com/dimando/reader/converter/internal/align"
 	"github.com/dimando/reader/converter/internal/cache"
+	"github.com/dimando/reader/converter/internal/embalign"
 	"github.com/dimando/reader/converter/internal/jsonx"
+	"github.com/dimando/reader/converter/internal/lexcheck"
+	"github.com/dimando/reader/converter/internal/segment"
 	"github.com/dimando/reader/converter/internal/tbook"
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/errgroup"
@@ -21,6 +24,27 @@ import (
 // pass plus retries for sentences the model dropped (returned no chunks for).
 // Transient HTTP failures are already retried inside Client.Translate.
 const maxRounds = 3
+
+// Alignment-pass modes. AlignEmb and AlignHybrid use the local embedding
+// aligner (internal/embalign) instead of — or, for hybrid, in front of — the
+// LLM align pass.
+const (
+	AlignLLM    = "llm"    // LLM align pass only (production default)
+	AlignEmb    = "emb"    // embedding aligner only; no LLM fallback
+	AlignHybrid = "hybrid" // embedding aligner, LLM pass for gated sentences
+)
+
+// DefaultEmbQMin is the hybrid-gate coverage threshold: an embedding
+// alignment covering less than this fraction of translation words goes to the
+// LLM align pass instead. Measured on an en→ru novel, 0.7 routes ~7% of
+// sentences to the LLM (together with the lexcheck part of the gate).
+const DefaultEmbQMin = 0.7
+
+// WordAligner is the embedding aligner interface (satisfied by
+// *embalign.Aligner): word strings in, [srcWordIdx, tgtWordIdx] pairs out.
+type WordAligner interface {
+	Align(srcWords, tgtWords []string) ([][2]int, error)
+}
 
 // Pipeline translates sentences into the cache via OpenRouter.
 type Pipeline struct {
@@ -37,6 +61,15 @@ type Pipeline struct {
 	// glossary translations never mix with plain ones in the cache.
 	Glossary   []GlossEntry
 	CacheModel string // cache-key model component; empty = Client model
+
+	// Embedding alignment (see AlignLLM/AlignEmb/AlignHybrid). EmbAligner must
+	// be non-nil for the emb/hybrid modes. LexDicts, when non-nil, supplies the
+	// per-target lexcheck dictionary for the hybrid gate (nil dict = Q-only
+	// gate). EmbQMin is the gate's coverage threshold (0 = DefaultEmbQMin).
+	AlignMode  string
+	EmbAligner WordAligner
+	LexDicts   func(target string) *lexcheck.Dict
+	EmbQMin    float64
 
 	mu      sync.Mutex
 	lastErr error // most recent batch failure, for the leftovers warning
@@ -163,12 +196,100 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 	// the translate set and skip the align phase entirely (escalated sentences
 	// then ship with no alignment at all).
 	if _, needAl, _, _ = p.pendingTwoPhase(sentences, target, false); len(needAl) > 0 {
-		sys := alignSystemPrompt(LangName(p.Source), LangName(target))
-		if err := p.runPhase(ctx, sys, needAl, target, phaseAlign); err != nil {
-			return err
+		if p.EmbAligner != nil && (p.AlignMode == AlignEmb || p.AlignMode == AlignHybrid) {
+			needAl = p.embedAlign(ctx, needAl, target)
+		}
+		if len(needAl) > 0 {
+			sys := alignSystemPrompt(LangName(p.Source), LangName(target))
+			if err := p.runPhase(ctx, sys, needAl, target, phaseAlign); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// embedAlign aligns pending sentences with the local embedding aligner,
+// writing final cache entries indistinguishable from LLM-aligned ones (same
+// key, same shape — FillFromCache, judge and escalation are agnostic). In
+// hybrid mode, sentences the gate rejects (lexcheck flag or coverage below
+// EmbQMin) are returned for the LLM align pass; in emb mode nothing is
+// returned and gate-rejected sentences ship as aligned-by-embedding anyway.
+func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) (leftover []item) {
+	model := p.cacheModel()
+	var dict *lexcheck.Dict
+	if p.LexDicts != nil {
+		dict = p.LexDicts(target)
+	}
+	bar := progressbar.Default(int64(len(items)), "embalign")
+	aligned, gated := 0, 0
+	for i, it := range items {
+		if ctx.Err() != nil {
+			break
+		}
+		raw, ok := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, model))
+		if !ok || strings.TrimSpace(raw.Text) == "" {
+			_ = bar.Add(1)
+			continue // no raw translation to align; ships via the raw fallback
+		}
+		text := ensureListPrefix(it.s.Src, raw.Text)
+		trWords := segment.Tokenize(text)
+		pairs, err := p.EmbAligner.Align(
+			embalign.WordStrings(it.s.Src, it.s.Words),
+			embalign.WordStrings(text, trWords))
+		if err != nil {
+			if errors.Is(err, embalign.ErrDead) {
+				fmt.Printf("[%s] embedding aligner died (%v) — %d sentences fall back to the LLM align pass\n",
+					target, err, len(items)-i)
+				if p.AlignMode == AlignHybrid {
+					leftover = append(leftover, items[i:]...)
+				}
+				break
+			}
+			// Per-sentence failure: gate it like a low-quality alignment.
+			if p.AlignMode == AlignHybrid {
+				leftover = append(leftover, it)
+				gated++
+			}
+			_ = bar.Add(1)
+			continue
+		}
+		chunks, q := embalign.Chunks(pairs, trWords)
+		tr := tbook.Translation{Text: text, Align: chunks, Q: q}
+		if p.AlignMode == AlignHybrid && p.rejectEmbedded(dict, it.s, tr, target) {
+			leftover = append(leftover, it)
+			gated++
+			_ = bar.Add(1)
+			continue
+		}
+		_ = cache.Write(p.CacheDir, it.key, tr)
+		aligned++
+		_ = bar.Add(1)
+	}
+	_ = bar.Finish()
+	fmt.Printf("[%s] embedding-aligned %d sentences locally; %d gated to the LLM align pass\n",
+		target, aligned, gated)
+	return leftover
+}
+
+// rejectEmbedded is the hybrid gate: too-low alignment coverage, or a
+// lexcheck flag (drift/wrong-word evidence), sends the sentence to the LLM
+// align pass instead.
+func (p *Pipeline) rejectEmbedded(dict *lexcheck.Dict, s *tbook.Sentence, tr tbook.Translation, target string) bool {
+	qmin := p.EmbQMin
+	if qmin == 0 {
+		qmin = DefaultEmbQMin
+	}
+	if tr.Q < qmin {
+		return true
+	}
+	if dict != nil {
+		tmp := &tbook.Sentence{Src: s.Src, Words: s.Words, Tr: map[string]tbook.Translation{target: tr}}
+		if dict.CheckSentence(tmp, target).Flagged {
+			return true
+		}
+	}
+	return false
 }
 
 // pendingTwoPhase splits not-yet-final sentences (de-duped) into the translate
@@ -425,6 +546,32 @@ func CountPending(sentences []*tbook.Sentence, targets []string, cacheDir, sourc
 			}
 			if fin, ok := cache.Read(cacheDir, key); !ok || suspiciousTranslation(fin.Text) {
 				pending++ // absent, or carries an artifact that healing will redo
+			}
+		}
+	}
+	return pending
+}
+
+// CountPendingTranslate returns how many unique (sentence,target) pairs have
+// no cached RAW translation — the work that strictly needs the LLM. With
+// align-mode emb the align phase is local, so a run whose translate phase is
+// clean (e.g. re-aligning after a PromptVersion bump) needs no API at all.
+func CountPendingTranslate(sentences []*tbook.Sentence, targets []string, cacheDir, source, model string, force bool) int {
+	seen := map[string]bool{}
+	pending := 0
+	for _, target := range targets {
+		for _, s := range sentences {
+			key := cache.TrKey(s.Src, source, target, model)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if force {
+				pending++
+				continue
+			}
+			if tr, ok := cache.Read(cacheDir, key); !ok || suspiciousTranslation(tr.Text) {
+				pending++
 			}
 		}
 	}

@@ -24,6 +24,7 @@ import (
 
 	"github.com/dimando/reader/converter/internal/cache"
 	"github.com/dimando/reader/converter/internal/config"
+	"github.com/dimando/reader/converter/internal/embalign"
 	"github.com/dimando/reader/converter/internal/epub"
 	"github.com/dimando/reader/converter/internal/fb2"
 	"github.com/dimando/reader/converter/internal/lexcheck"
@@ -163,6 +164,11 @@ func run() error {
 		return translate.CountPending(translatable, cfg.Targets, cfg.CacheDir, cfg.Source, cacheModel, cfg.Force)
 	}
 	needAPI := countPending() > 0 || cfg.Glossary || cfg.Judge
+	if cfg.AlignMode == config.AlignEmb && !cfg.Glossary && !cfg.Judge {
+		// emb aligns locally: only the translate phase needs the LLM.
+		needAPI = translate.CountPendingTranslate(translatable, cfg.Targets, cfg.CacheDir,
+			cfg.Source, cacheModel, cfg.Force) > 0
+	}
 	var client *translate.Client
 	if needAPI {
 		switch cfg.Provider {
@@ -209,6 +215,20 @@ func run() error {
 			Concurrency: cfg.Concurrency,
 			Force:       cfg.Force,
 			Glossary:    glossary, CacheModel: cacheModel,
+			AlignMode: cfg.AlignMode, EmbQMin: cfg.EmbQMin,
+		}
+		if cfg.AlignMode != config.AlignLLM {
+			fmt.Printf("Starting embedding aligner (%s, %s) ...\n", cfg.EmbModel, cfg.EmbMethod)
+			aligner, err := embalign.Start(embalign.Options{
+				Python: cfg.EmbPython, Script: cfg.EmbScript,
+				Model: cfg.EmbModel, Layer: cfg.EmbLayer, Method: cfg.EmbMethod,
+			})
+			if err != nil {
+				return err
+			}
+			defer aligner.Close()
+			pipe.EmbAligner = aligner
+			pipe.LexDicts = lexDictLoader(cfg)
 		}
 		if err := pipe.Run(ctx, translatable, cfg.Targets); err != nil {
 			return err
@@ -309,6 +329,25 @@ func clientOptions(cfg *config.Config, model string, temperature float64) transl
 		Temperature: temperature, JSONMode: cfg.JSONMode,
 		MaxRetries: cfg.MaxRetries, Timeout: cfg.Timeout,
 		ProviderSort: cfg.ProviderSort, ProviderOrder: cfg.ProviderOrder,
+	}
+}
+
+// lexDictLoader supplies per-target lexcheck dictionaries for the hybrid
+// align gate, caching loads. A missing lexicon disables the lexcheck part of
+// the gate for that target (the coverage threshold still applies).
+func lexDictLoader(cfg *config.Config) func(target string) *lexcheck.Dict {
+	dicts := map[string]*lexcheck.Dict{}
+	return func(target string) *lexcheck.Dict {
+		if d, ok := dicts[target]; ok {
+			return d
+		}
+		d, err := lexcheck.Load(cfg.LexiconDir, cfg.Source, target)
+		if err != nil || d == nil {
+			fmt.Printf("[%s] hybrid gate: no lexicon (%v) — gating on alignment coverage only\n", target, err)
+			d = nil
+		}
+		dicts[target] = d
+		return d
 	}
 }
 
