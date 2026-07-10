@@ -71,8 +71,37 @@ type Pipeline struct {
 	LexDicts   func(target string) *lexcheck.Dict
 	EmbQMin    float64
 
-	mu      sync.Mutex
-	lastErr error // most recent batch failure, for the leftovers warning
+	mu          sync.Mutex
+	lastErr     error // most recent batch failure, for the leftovers warning
+	totalSents  int
+	cachedSents int
+	okSents     int
+	leftSents   int
+	errSents    int
+}
+
+func (p *Pipeline) updateBarDescription(bar *progressbar.ProgressBar, name string) {
+	if bar == nil {
+		return
+	}
+	p.mu.Lock()
+	width := len(strconv.Itoa(p.totalSents))
+	if width < 1 {
+		width = 1
+	}
+	format := fmt.Sprintf("%%-9s [ok:%%%dd/%%d | left:%%%dd | err:%%%dd]", width, width, width)
+	desc := fmt.Sprintf(format, name, p.okSents, p.totalSents, p.leftSents, p.errSents)
+	p.mu.Unlock()
+	bar.Describe(desc)
+}
+
+func (p *Pipeline) addBatchResult(bar *progressbar.ProgressBar, name string, failed, succeeded int) {
+	p.mu.Lock()
+	p.okSents += succeeded
+	p.leftSents -= (failed + succeeded)
+	p.errSents += failed
+	p.mu.Unlock()
+	p.updateBarDescription(bar, name)
 }
 
 // noteErr records a batch failure so the "sentences left" warning can say why.
@@ -183,6 +212,11 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 	needTr, needAl, nUnique, cached := p.pendingTwoPhase(sentences, target, p.Force)
 	fmt.Printf("[%s] %d unique sentences — %d cached, %d to translate, %d to align\n",
 		target, nUnique, cached, len(needTr), len(needAl))
+
+	p.mu.Lock()
+	p.totalSents = nUnique
+	p.cachedSents = cached
+	p.mu.Unlock()
 
 	if len(needTr) > 0 {
 		sys := translateSystemPrompt(LangName(p.Source), LangName(target), p.Glossary)
@@ -337,6 +371,12 @@ func (p *Pipeline) runPhase(ctx context.Context, system string, items []item, ta
 	model := p.cacheModel()
 	remaining := items
 	for round := 0; round < maxRounds && len(remaining) > 0; round++ {
+		p.mu.Lock()
+		p.leftSents = len(remaining)
+		p.errSents = 0
+		p.okSents = p.totalSents - len(remaining)
+		p.mu.Unlock()
+
 		if round > 0 {
 			fmt.Printf("[%s] retrying %d sentences (%s, round %d/%d)\n",
 				target, len(remaining), ph, round+1, maxRounds)
@@ -397,11 +437,13 @@ func (p *Pipeline) phaseBatches(ctx context.Context, system string, items []item
 	}
 
 	bar := progressbar.Default(int64(len(batches)), ph.String())
+	p.updateBarDescription(bar, ph.String())
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(max(1, p.Concurrency))
 	for _, batch := range batches {
+		batch := batch
 		g.Go(func() error {
-			err := p.doBatch(ctx, system, batch, target, ph)
+			err := p.doBatch(ctx, system, batch, target, ph, bar)
 			_ = bar.Add(1)
 			return err
 		})
@@ -414,8 +456,23 @@ func (p *Pipeline) phaseBatches(ctx context.Context, system string, items []item
 // doBatch runs one batch. Its returned error is non-nil ONLY for failures that
 // must abort the run (usage limit) — ordinary batch failures return nil and
 // are retried by the round loop.
-func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, target string, ph phase) error {
+func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, target string, ph phase, bar *progressbar.ProgressBar) error {
 	model := p.cacheModel()
+	defer func() {
+		successCount := 0
+		for _, it := range batch {
+			doneKey := it.key
+			if ph == phaseTranslate {
+				doneKey = cache.TrKey(it.s.Src, p.Source, target, model)
+			}
+			if _, ok := cache.Read(p.CacheDir, doneKey); ok {
+				successCount++
+			}
+		}
+		failCount := len(batch) - successCount
+		p.addBatchResult(bar, ph.String(), failCount, successCount)
+	}()
+
 	byKey := make(map[string]*tbook.Sentence, len(batch))
 	for _, it := range batch {
 		byKey[it.key] = it.s
