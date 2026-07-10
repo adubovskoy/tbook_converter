@@ -76,6 +76,12 @@ func TestTwoPassPipeline(t *testing.T) {
 	if translateCalls == 0 || alignCalls == 0 {
 		t.Fatalf("expected both phases to run, got translate=%d align=%d", translateCalls, alignCalls)
 	}
+	if pipe.totalSents != 2 {
+		t.Errorf("expected totalSents to be 2, got %d", pipe.totalSents)
+	}
+	if pipe.okSents != 2 {
+		t.Errorf("expected okSents to be 2, got %d", pipe.okSents)
+	}
 
 	// Both phases cached → nothing pending; final entries are aligned.
 	if p := CountPending(sentences, []string{"ru"}, cacheDir, "en", model, false); p != 0 {
