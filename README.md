@@ -26,7 +26,7 @@ tools/fetch-lexicons.sh en-ru   # dictionary for the free drift check
 ```
 
 No further flags needed — **the defaults are the measured optimum**
-(see [speed-report.md](speed-report.md)): a 200k-word novel converts in
+(see [the speed report](https://github.com/adubovskoy/tbook_converter/issues/2)): a 200k-word novel converts in
 **~15 minutes for ~$2** on the default `google/gemini-2.5-flash`.
 Runs are resumable: interrupt and re-run to continue from the cache; a
 fully-cached run assembles offline without an API key.
@@ -93,7 +93,7 @@ Validation proves the file is *well-formed*; two gates check it is *correct*:
   and writes flagged sentences to `<out>.flagged.json`. With the default
   `hybrid` alignment treat it as a **report**, not an automatic gate — the
   judge over-flags the embedding aligner's per-word style (measured 53–57%
-  false flags on correct de→ru alignments, speed-report.md §5.2).
+  false flags on correct de→ru alignments — see the speed report, issue #2).
 
 To redo sentences a report (or your own reading) flagged:
 
@@ -102,7 +102,7 @@ To redo sentences a report (or your own reading) flagged:
 ./convert book.epub -o book.tbook        # re-translates only those
 ```
 
-**Escalation warning** (measured, speed-report.md §5.3): with the default
+**Escalation warning** (measured — speed report, issue #2): with the default
 `hybrid` alignment, leave `--escalate-model` off. The hybrid gate already
 LLM-re-aligns every suspicious sentence inside the pipeline; the post-run
 lexcheck flags that remain are almost entirely dictionary-coverage artifacts
@@ -123,7 +123,7 @@ highlights but can never rewrite the text. Everything is cached per sentence
 (`promptVersion|model|source|target|src`), so runs resume and contract bumps
 re-align without re-translating.
 
-Full details: [speed-report.md](speed-report.md) (measurements & tuning),
+Full details: [the speed report](https://github.com/adubovskoy/tbook_converter/issues/2) (measurements & tuning),
 [`../doc/specs/tbook-format.md`](../doc/specs/tbook-format.md) (format),
 [`../doc/specs/article.md`](../doc/specs/article.md) (design history).
 

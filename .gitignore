@@ -21,3 +21,6 @@ lexicons/
 *.lexflagged.json
 *.unverified.json
 *stats.jsonl
+
+# Python bytecode
+__pycache__/

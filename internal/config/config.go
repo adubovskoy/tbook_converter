@@ -75,7 +75,7 @@ type Config struct {
 
 	// Alignment pass. "hybrid" (default) = local embedding aligner with LLM
 	// fallback for gated sentences; "emb" = embedding aligner only; "llm" =
-	// LLM align pass (see speed-report.md and tools/embalign-setup.sh).
+	// LLM align pass (see the speed report in issue #2 and tools/embalign-setup.sh).
 	// AlignModeExplicit records whether the user chose the mode (flag or env):
 	// an explicit emb/hybrid fails hard when the aligner can't start, while the
 	// hybrid default degrades to llm with a notice.
