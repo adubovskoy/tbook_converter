@@ -13,3 +13,11 @@ lexicons/
 *.epub
 *.fb2
 *.tbook
+
+# Run artifacts (reports, request metrics, experiment caches, lexeval binary)
+/lexeval
+.cache-*/
+*.flagged.json
+*.lexflagged.json
+*.unverified.json
+*stats.jsonl

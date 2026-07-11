@@ -1,248 +1,133 @@
 # EPUB/FB2 → `.tbook` converter (Go)
 
 Turns a standard `.epub` (or `.fb2` / `.fb2.zip`) into a **`.tbook`** archive
-for the [Reader app](../android): every sentence gets a translation **and
-word-level alignment**, so the app shows the full-sentence translation with the
-tapped word highlighted — fully offline.
+for the Reader app: every sentence gets a translation **and word-level
+alignment**, so the app shows the full-sentence translation with the tapped
+word highlighted — fully offline.
 
 ## Quick start
 
 ```bash
-# 1. Build
 cd converter
 go build -o convert ./cmd/convert
 
-# 2. Configure — set OPENROUTER_API_KEY (get one at https://openrouter.ai/keys)
-cp .env.example .env
+# One-time setup
+cp .env.example .env            # put your OPENROUTER_API_KEY in it
+tools/embalign-setup.sh         # free local word aligner (LaBSE, CPU)
+tools/fetch-lexicons.sh en-ru   # dictionary for the free drift check
 
-# 3. Convert (English → Russian by default; resumable — re-run to continue)
+# Convert (English → Russian by default)
 ./convert book.epub -o book.tbook
-```
 
-That's it. Useful variants:
-
-```bash
-# No API key: run on your Claude subscription (needs a logged-in `claude` CLI)
-./convert book.epub --provider claude -o book.tbook
-
-# Cheaper: align words locally for free (LaBSE on CPU) instead of via the LLM —
-# cuts the align-pass tokens ~90%; one-time setup downloads the model
-tools/embalign-setup.sh
-./convert book.epub --align-mode hybrid -o book.tbook
-
-# Other target language(s); add one to an existing .tbook without the EPUB
-./convert book.epub -t de,es -o book.tbook
+# Other languages; add a language to an existing .tbook; preview only
+./convert book.epub -s de -t ru -o book.tbook
 ./convert book.tbook -t en
-
-# Preview parsing only — no API calls, no output
 ./convert book.epub --dry-run
 ```
 
-Settings precedence: **command-line flags > shell env > `.env` > defaults**.
-Run `./convert --help` for the full flag list.
+No further flags needed — **the defaults are the measured optimum**
+(see [speed-report.md](speed-report.md)): a 200k-word novel converts in
+**~15 minutes for ~$2** on the default `google/gemini-2.5-flash`.
+Runs are resumable: interrupt and re-run to continue from the cache; a
+fully-cached run assembles offline without an API key.
 
-## What it does
+A plain run does, in order:
 
-The whole job is **parse → translate → assemble → validate**, with two
-translation backends: **OpenRouter** (metered API, any model; default
-`google/gemini-2.5-flash`) or **`--provider claude`**, which shells out to the
-`claude` CLI in print mode so every batch runs on your logged-in **Claude
-subscription** — no API key, no per-token billing (it consumes the
-subscription's usage windows; on a limit the run stops with the reset time and
-resumes from cache). For the claude backend the default model is
-`claude-haiku-4-5` (override with `CLAUDE_MODEL` / `--model`); `.env`'s `MODEL`
-is OpenRouter-only and never leaks into the claude backend, and
-`ANTHROPIC_API_KEY` is stripped from the CLI's environment so runs can only
-bill to the subscription.
+1. **Parse + segment** — chapters, images, tables, footnotes, emphasis
+   preserved; front/back matter skipped; sentences tokenized with rune offsets.
+2. **Glossary** (1 extra call) — recurring terms + proper nouns, enforced in
+   every batch so names stay consistent. `--no-glossary` skips it (also needed
+   to reuse caches made before glossary became the default).
+3. **Translate** — batches of 16, 32 requests in parallel.
+4. **Align** — free local LaBSE word alignment (`hybrid` mode); the ~4% of
+   sentences the quality gate rejects are re-aligned by the LLM. Without the
+   embalign setup the run falls back to full LLM alignment with a notice.
+5. **Lexcheck** — free offline dictionary drift check; flags go to
+   `<out>.lexflagged.json`.
+6. **Assemble + validate** — structure, offsets, and alignment coverage.
 
-The translation cache is resumable: interrupted runs continue where they left
-off, adding a language only translates the new one, and a fully-cached run
-assembles **offline with no API key**. Source formatting and content are
-preserved — per-paragraph roles (subtitles, scene breaks), inline italic/bold,
-**body images with translatable captions**, **tables with translatable cells**,
-and **footnotes** (markers stripped from the prose, bodies extracted and
-translatable) — while front/back matter (cover pages, synopsis, credits, index)
-is skipped by default. The `.tbook` format (version 1) is specified in
-[`../doc/specs/tbook-format.md`](../doc/specs/tbook-format.md).
+If you can't/won't use an API key: `./convert book.epub --provider claude`
+runs every batch on your logged-in `claude` CLI subscription (default model
+`claude-haiku-4-5`; `MODEL` in `.env` is OpenRouter-only and never leaks into
+the claude backend).
 
-FB2 scope: metadata, cover, sections as chapters (headings, subtitles, scene
-breaks) and inline emphasis; FB2 note bodies, poems, epigraphs and images are
-skipped (EPUB input supports all of those).
-
-The run shows a progress bar, retries transient failures (network/5xx/429 with
-backoff) and sentences the model drops, then **validates** the result and prints
-`sentences / empty / offset_errors`. Sentences left untranslated are written
-with an empty translation (no highlight) — re-run to fill them.
+Settings precedence: **flags > shell env > `.env` > defaults**.
+`./convert --help` lists everything.
 
 ## Flags
 
 Core: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
 `--provider` (`openrouter`|`claude`), `--model`, `--cache-dir` (default
-`.tbook_cache`), `--batch-size`, `--concurrency`, `--max-retries`,
-`--limit-chapters N`, `--dry-run`, `--force` (re-translate, ignoring cache),
-`-v`.
+`.tbook_cache`), `--limit-chapters N`, `--dry-run`, `--force` (ignore cache),
+`--stats file.jsonl` (per-request latency/provider/tokens/cost log), `-v`.
 
-Alignment: `--align-mode` (`llm`|`emb`|`hybrid`, see below), `--align-batch`
-(LLM align batch size; small batches curb positional drift), and the
-`--embalign-*` family (python/script/model/layer/method/threshold) for the
-local aligner.
+Performance (defaults are measured optima — change only with reason):
+`--batch-size` (16; bigger is *slower* — generation is output-bound),
+`--concurrency` (32; gemini took 48 with zero 429s — lower for `:free` models),
+`--align-mode` (`hybrid` default | `emb` | `llm`), `--align-batch`,
+`--max-retries`, `--embalign-*` (local aligner: python/script/model/layer/
+method/threshold), `--provider-sort`/`--provider-order` (OpenRouter routing;
+for whole books keep the default — `throughput` sort pins one provider and
+serializes concurrency).
 
-Content: `--keep-matter` (don't skip cover/synopsis/credits/index),
-`--skip-files pat1,pat2` (extra title/filename patterns to skip), `--no-images`,
-`--no-notes`, `--skip-citations` (keep citation-kind footnotes untranslated —
-bibliographic references have little learner value and cost tokens).
+Content: `--keep-matter`, `--skip-files pat1,pat2`, `--no-images`, `--no-notes`,
+`--skip-citations` (leave bibliographic footnotes untranslated).
 
-Quality: `--glossary` (one extra call builds a book glossary — recurring terms
-+ proper nouns — enforced in every translate batch for consistency), the free
-static drift check (see below) runs **by default** — `--no-lexcheck` disables
-it, `--judge` (semantic verification pass, see below), `--judge-model`,
-`--judge-invalidate`, `--escalate-model`.
-
-Provider routing (OpenRouter): `--provider-sort throughput|latency|price` and
-`--provider-order slug1,slug2` (e.g. `alibaba`). For **bulk** runs prefer the
-default routing or `latency` — `throughput` pins the single fastest-tok/s
-provider and serializes concurrency (measurably slower for a whole book).
-
-## How it works
-
-1. **Parse** the EPUB in spine order (`archive/zip` + `goquery`); chapter
-   boundaries come from the NCX navigation (all levels flattened — a book's
-   parts AND its chapters each become one chapter), falling back to
-   `<div class="title1">` splitting; front/back matter is skipped; footnote
-   markers are stripped from prose and their bodies resolved from the notes
-   document; body images (with captions) and tables are extracted; the cover
-   extracted; oversized images downscaled.
-2. **Segment** paragraphs into sentences (the `sentencizer` library, after a fix
-   that re-inserts spaces missing after `…"`-style breaks) and tokenize source
-   **words with rune offsets**.
-3. **Translate, then align** via the LLM backend, in **two decoupled passes**:
-   pass 1 translates (`{id,src}` → text); pass 2 aligns the finished translation
-   (`{id,src,words,tr}` → ordered `{tgt, en}` chunks, target fragment → the
-   **numbered source word(s)** it translates, echoed as `"index:text"`). Doing
-   both in one pass makes the model fall into *positional drift* (target word
-   *i* ↔ source word *i*) at batch scale, so they're split — and the align pass
-   runs in **small batches** (`--align-batch`, default batch-size/4), which
-   measurably curbs drift on cheap models. Pass 2 can also run **locally for
-   free** (`--align-mode emb|hybrid`, next section). Pass 1 output containing
-   leaked special tokens (`<bos>`, `<|…|>`, U+FFFD) is rejected and retried.
-   The two contracts are versioned separately (`TrPromptVersion = v4`,
-   `PromptVersion = v7`), so an align-contract change re-aligns a book without
-   re-translating it; raw translations cache under a `…|tr|…` namespace.
-4. **Resolve + locate**: an `index:text` token resolves to its index when
-   the echoed text matches that word (the text is a checksum on the index), else
-   falls back to match-by-text (a multi-word string is whitespace-split first).
-   The **raw pass-1 translation is the canonical text**: each echoed fragment is
-   located inside it (case/punctuation-insensitive, in target order) to compute
-   the `[start,end)` highlight spans **deterministically** — the align pass can
-   place highlights but can never rewrite the text, so a sloppy echo cannot
-   strip punctuation or swap words (pre-v6 it could). A mapped fragment that
-   cannot be located means the echo diverged — the sentence is retried, and if
-   it never aligns it ships as raw text with no highlights. Punctuation-only
-   fragments never make highlights; a list marker (`1.`, `2)`) the model
-   dropped from the translation is restored deterministically.
-5. **Cache** every sentence on disk (`.tbook_cache/`, keyed by
-   `promptVersion|model|source|target|src`) → fully resumable.
-6. **Assemble** `manifest.json` + `cover.jpg` + `chapters/chN.json` into the ZIP,
-   then validate — reporting structural integrity **and alignment coverage** (a
-   `<55%` warning flags gross drift / empty alignment).
-
-## Local embedding alignment (`--align-mode`)
-
-Pass 2 can run **locally for free** instead of through the LLM: a SimAlign-style
-aligner (LaBSE token embeddings + mutual argmax, `tools/embalign.py`) matches
-words by semantic similarity, so positional drift is structurally impossible.
-Benchmarked against the LLM align pass it scores *better* on lexcheck (support
-rate 0.710 vs 0.672 en→ru, p≈0.009) at zero token cost — the whole align pass
-for a book runs in minutes on CPU.
-
-```bash
-tools/embalign-setup.sh      # one-time: creates .venv-embalign (CPU torch);
-                             # the first run downloads LaBSE (~1.8 GB)
-
-# Recommended: embedding alignment with an LLM safety net — sentences the free
-# gate rejects (lexcheck flag or coverage < --embalign-q, ~7%) are re-aligned
-# by the LLM align pass:
-./convert book.epub -t ru --align-mode hybrid
-
-# Fully local align pass (no LLM fallback). With a fully translated cache this
-# needs no API key at all — e.g. re-aligning after an align-contract bump:
-./convert book.epub -t ru --align-mode emb
-```
-
-Only en→ru was benchmarked; treat other language pairs as unverified and spot
-check with `--judge` before trusting them. Escalation always uses the LLM
-align pass regardless of mode. Note the judge is calibrated on LLM-style
-alignment chunks and over-flags the sparser embedding style — prefer lexcheck
-(built into the hybrid gate) as the standing check for embedding-aligned books.
+Quality: `--no-glossary`, `--no-lexcheck`, `--judge` (semantic verification
+report, see below), `--judge-scope` (`flagged` default: suspects + a 5%
+calibration sample — seconds per book | `all`), `--judge-model`,
+`--judge-invalidate`, `--escalate-model` (redo flagged sentences with a
+stronger model — see the warning below), `--invalidate file.json` (clear cached
+translations for listed sentences, then exit).
 
 ## Quality & verification
 
-Validation + coverage prove the file is *well-formed and mapped* — they do **not**
-prove the alignment is *correct*. A partial positional drift or a wrong-word
-mapping keeps coverage ~100%, and a fluent mistranslation is still valid text.
-Two verification gates catch those:
+Validation proves the file is *well-formed*; two gates check it is *correct*:
 
-**Lexcheck — free, offline, instant, on by default** (`--no-lexcheck` disables).
-A bilingual dictionary (OPUS OpenSubtitles word-alignment data;
-`tools/fetch-lexicons.sh` covers every pair of de/en/es/fr/it/ru) statically
-scores each align pair: is the target fragment a dictionary-plausible rendering
-of its source word? Isolated misses are ignored (words are polysemous,
-dictionaries register-biased); a sentence is flagged only on aggregate
-evidence — a low overall support rate, or the **shift signature** (several
-fragments that don't fit their own word but fit its *neighbor* — the
-fingerprint of an off-by-one cascade, robust to polysemy). Benchmarked on a
-real book with synthetic drift injection (`cmd/lexeval`): ~87% recall on full
-cascades, ~52% on mid-sentence cascades, at ~2.4% false positives / 97%
-precision, with 72% of pairs dictionary-covered.
+- **Lexcheck** (free, offline, on by default): a bilingual dictionary scores
+  every alignment pair and flags sentences on aggregate evidence — low support
+  or the off-by-one *shift signature*. Measured ~87% recall on drift cascades
+  at ~97% precision. Lexicons: `tools/fetch-lexicons.sh` (all pairs of
+  de/en/es/fr/it/ru).
+- **`--judge`**: an independent LLM reads source, translation, and word mapping,
+  and writes flagged sentences to `<out>.flagged.json`. With the default
+  `hybrid` alignment treat it as a **report**, not an automatic gate — the
+  judge over-flags the embedding aligner's per-word style (measured 53–57%
+  false flags on correct de→ru alignments, speed-report.md §5.2).
 
-**`--judge` — the semantic gate** (see [spec §10.4](../doc/specs/tbook-format.md)):
-an independent LLM reads every sentence's source, translation, and word-mapping
-and flags real errors — including mistranslations no dictionary can see. The
-judge model defaults to the translate model; `--judge-model` overrides.
-Verdicts are cached, so re-runs only judge what changed.
-
-Judge calibration is measured, not guessed (all numbers from a hand-reviewed
-page plus synthetic-drift twins, `cmd/driftdemo`, prompt j3): the same-model
-cheap judge (flash-lite) catches 12/14 drifted sentences with almost no false
-positives; gemini-2.5-flash catches 14/14 but flags 36-53% of clean prose on
-mapping pedantry — in a two-chapter loop it even re-flagged **69% of its own
-escalated output**, condemning escalation to mass fallback. So: cheap judge +
-lexcheck as the standing gate, stronger judge only for one-off audits. Judge
-wording is equally delicate: a lenient "flag only reader-visible defects"
-phrasing dropped the cheap judge's drift recall to zero — calibrate any prompt
-change against drifted twins first.
-
-Flags from both gates feed `--escalate-model` — and escalation is **re-verified**:
-the same gates re-check the escalated output, anything still flagged gets one
-more attempt, and persistent failures are stripped rather than shipped (a judged
-mistranslation ships untranslated, an alignment failure ships as raw text with
-no highlights; both are listed in `<out>.unverified.json` and retried on the
-next run). A stronger model is not a verified model — without this loop an
-escalated hallucination lands in the book unseen.
+To redo sentences a report (or your own reading) flagged:
 
 ```bash
-# The recommended cheap-model loop — one command:
-# translate+align with the cheap model, lexcheck (free, default) + judge
-# everything, then automatically redo ONLY the flagged sentences with a
-# stronger model (kept in the same file):
-tools/fetch-lexicons.sh en-ru   # once per language pair
-./convert book.epub -o book.tbook --judge --escalate-model google/gemini-2.5-flash
-
-# Manual variant:
-./convert book.epub -o book.tbook --judge                  # flags → book.tbook.flagged.json
-./convert book.epub --invalidate book.tbook.flagged.json   # drop their cached tr + alignment
-./convert book.epub -o book.tbook                          # redoes only those
-# …or in one step: --judge --judge-invalidate, then re-run.
+./convert book.epub --invalidate book.tbook.lexflagged.json
+./convert book.epub -o book.tbook        # re-translates only those
 ```
 
-Every emitted translation also carries `q` — its alignment-coverage score — so
-downstream tools can rank sentences for review.
+**Escalation warning** (measured, speed-report.md §5.3): with the default
+`hybrid` alignment, leave `--escalate-model` off. The hybrid gate already
+LLM-re-aligns every suspicious sentence inside the pipeline; the post-run
+lexcheck flags that remain are almost entirely dictionary-coverage artifacts
+(foreign quotes, macaronic passages) with correct alignments. Escalating them
+burns tokens and can degrade good sentences to no-highlight fallback — and
+never use a reasoning-tier model (`*-pro`) as the escalator (p95 90 s/request).
+
+## How it works (short version)
+
+Translation and alignment are **two decoupled passes** — a single combined
+pass collapses into positional drift at batch scale. Pass 1 translates
+(`{id,src}` → text). Pass 2 aligns the finished translation: locally via
+SimAlign-style LaBSE embeddings (mutual argmax — structurally immune to
+positional drift, and it *beats* the LLM align pass on lexcheck for en→ru and
+de→ru), with the LLM numbered-echo contract (`"index:text"`) as fallback for
+gated sentences. The raw pass-1 text is canonical: alignment can place
+highlights but can never rewrite the text. Everything is cached per sentence
+(`promptVersion|model|source|target|src`), so runs resume and contract bumps
+re-align without re-translating.
+
+Full details: [speed-report.md](speed-report.md) (measurements & tuning),
+[`../doc/specs/tbook-format.md`](../doc/specs/tbook-format.md) (format),
+[`../doc/specs/article.md`](../doc/specs/article.md) (design history).
 
 ## Ship it
-
-The reader app loads the bundled book from
-`../android/app/src/main/assets/sample.tbook`. To make a freshly converted book
-the app's default:
 
 ```bash
 cp book.tbook ../android/app/src/main/assets/sample.tbook
@@ -263,6 +148,6 @@ internal/fb2       FB2/FB2.zip → the same parsed-book structure
 internal/segment   sentence segmentation + word tokenization (rune offsets)
 internal/align     model chunks → highlight spans located in the raw translation
 internal/cache     resumable on-disk translation cache (sha256-keyed)
-internal/translate LLM clients (OpenRouter HTTP, claude CLI), prompts, batching/retry pipeline
+internal/translate LLM clients (OpenRouter HTTP, claude CLI), prompts, batching/retry
 internal/tbook     data model, ZIP assembly, validation
 ```
