@@ -115,7 +115,7 @@ func Judge(ctx context.Context, jc *Client, cacheDir, source string, targets []s
 					return nil
 				}
 				var raw json.RawMessage
-				if err := jc.ChatJSON(gctx, sys, string(userJSON), &raw); err != nil {
+				if err := jc.ChatJSON(WithPhase(gctx, "judge"), sys, string(userJSON), &raw); err != nil {
 					_ = bar.Add(1)
 					return abortOnly(err) // usage limit aborts; else left unjudged, reported below
 				}

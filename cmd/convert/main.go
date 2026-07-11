@@ -15,12 +15,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
 	"sort"
 	"strings"
 	"syscall"
+	"time"
+	"unicode"
 
 	"github.com/dimando/reader/converter/internal/cache"
 	"github.com/dimando/reader/converter/internal/config"
@@ -33,6 +36,10 @@ import (
 	"github.com/dimando/reader/converter/internal/translate"
 )
 
+// statsLog is the shared per-request JSONL sink (--stats); nil = disabled.
+// Package-level so every pass's client (translate, judge, escalate) shares it.
+var statsLog *translate.Stats
+
 func main() {
 	if err := run(); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -44,9 +51,18 @@ func main() {
 }
 
 func run() error {
+	runStart := time.Now()
 	cfg, err := config.Load(os.Args[1:])
 	if err != nil {
 		return err
+	}
+	if cfg.StatsPath != "" {
+		statsLog, err = translate.OpenStats(cfg.StatsPath)
+		if err != nil {
+			return fmt.Errorf("open --stats file: %w", err)
+		}
+		defer statsLog.Close()
+		fmt.Printf("Per-request metrics → %s\n", cfg.StatsPath)
 	}
 
 	// Verify/QA loop: clear cached translation+alignment for flagged sentences,
@@ -223,16 +239,29 @@ func run() error {
 				Python: cfg.EmbPython, Script: cfg.EmbScript,
 				Model: cfg.EmbModel, Layer: cfg.EmbLayer, Method: cfg.EmbMethod,
 			})
-			if err != nil {
+			switch {
+			case err == nil:
+				defer aligner.Close()
+				pipe.EmbAligner = aligner
+				pipe.LexDicts = lexDictLoader(cfg)
+			case cfg.AlignModeExplicit:
 				return err
+			default:
+				// The hybrid default must not break a machine without the local
+				// aligner: degrade to the LLM align pass and say how to get the
+				// free one back.
+				fmt.Printf("Embedding aligner unavailable (%v)\n"+
+					"  — falling back to --align-mode llm for this run; "+
+					"run tools/embalign-setup.sh to enable the free local align pass.\n", err)
+				cfg.AlignMode = config.AlignLLM
+				pipe.AlignMode = config.AlignLLM
 			}
-			defer aligner.Close()
-			pipe.EmbAligner = aligner
-			pipe.LexDicts = lexDictLoader(cfg)
 		}
+		t0 := time.Now()
 		if err := pipe.Run(ctx, translatable, cfg.Targets); err != nil {
 			return err
 		}
+		fmt.Printf("Pipeline (translate+align) wall time: %s\n", time.Since(t0).Round(time.Second))
 	} else {
 		fmt.Println("All sentences already cached — assembling offline (no API calls).")
 	}
@@ -256,13 +285,21 @@ func run() error {
 		}
 	}
 	if cfg.Judge {
-		flagged, err := runJudge(ctx, cfg, translatable)
+		judgeInput := translatable
+		var sample []string
+		if cfg.JudgeScope == config.JudgeScopeFlagged {
+			judgeInput, sample = judgeScopeFlagged(cfg, translatable, flaggedSet)
+		}
+		t0 := time.Now()
+		flagged, err := runJudge(ctx, cfg, judgeInput)
 		if err != nil {
 			return err
 		}
+		fmt.Printf("Judge wall time: %s\n", time.Since(t0).Round(time.Second))
 		for _, src := range flagged {
 			flaggedSet[src] = true
 		}
+		reportCalibration(sample, flagged)
 	}
 	if cfg.EscalateModel != "" && len(flaggedSet) > 0 {
 		flagged := make([]string, 0, len(flaggedSet))
@@ -270,6 +307,7 @@ func run() error {
 			flagged = append(flagged, src)
 		}
 		sort.Strings(flagged)
+		t0 := time.Now()
 		if err := escalate(ctx, cfg, glossary, cacheModel, translatable, flagged); err != nil {
 			return err
 		}
@@ -279,6 +317,7 @@ func run() error {
 		if err := reverifyEscalated(ctx, cfg, glossary, cacheModel, translatable, flagged); err != nil {
 			return err
 		}
+		fmt.Printf("Escalation wall time: %s\n", time.Since(t0).Round(time.Second))
 	}
 
 	fmt.Printf("Writing %s ...\n", cfg.Out)
@@ -315,7 +354,135 @@ func run() error {
 		return fmt.Errorf("validation failed: %d offset errors, %d struct errors",
 			rep.OffsetErrors, rep.StructErrors)
 	}
+	fmt.Printf("Total wall time: %s\n", time.Since(runStart).Round(time.Second))
 	return nil
+}
+
+// judgeScopeFlagged selects the sentences worth judging when --judge-scope
+// flagged: everything lexcheck flagged, everything with low alignment coverage
+// (embalign Q below the hybrid threshold, or — for entries with no stored Q —
+// locally computed chunk coverage; raw-fallback sentences with no alignment
+// land here too), plus a deterministic 5% calibration sample of the rest so a
+// judge-miss drift in the skipped population stays measurable. Returns the
+// subset and the sample's sources.
+func judgeScopeFlagged(cfg *config.Config, sentences []*tbook.Sentence, flaggedSet map[string]bool) ([]*tbook.Sentence, []string) {
+	qmin := cfg.EmbQMin
+	if qmin == 0 {
+		qmin = translate.DefaultEmbQMin
+	}
+	suspect := map[string]bool{}
+	var rest []*tbook.Sentence
+	seen := map[string]bool{}
+	for _, s := range sentences {
+		if seen[s.Src] {
+			continue
+		}
+		seen[s.Src] = true
+		if flaggedSet[s.Src] {
+			suspect[s.Src] = true
+			continue
+		}
+		lowQ := false
+		for _, target := range cfg.Targets {
+			tr, ok := s.Tr[target]
+			if !ok || tr.Text == "" {
+				continue
+			}
+			q := tr.Q
+			if q == 0 {
+				q = localCoverage(tr)
+			}
+			if q < qmin {
+				lowQ = true
+				break
+			}
+		}
+		if lowQ {
+			suspect[s.Src] = true
+		} else {
+			rest = append(rest, s)
+		}
+	}
+	// Deterministic sample: same book + flags → same sample across runs, so
+	// cached verdicts stay valid.
+	rng := rand.New(rand.NewSource(1))
+	rng.Shuffle(len(rest), func(i, j int) { rest[i], rest[j] = rest[j], rest[i] })
+	nSample := (len(rest) + 19) / 20 // 5%, rounded up
+	var sample []string
+	for _, s := range rest[:min(nSample, len(rest))] {
+		suspect[s.Src] = true
+		sample = append(sample, s.Src)
+	}
+	subset := make([]string, 0, len(suspect))
+	for src := range suspect {
+		subset = append(subset, src)
+	}
+	fmt.Printf("Judge scope: %d suspect (lexcheck/low-coverage) + %d calibration sample of %d clean = %d of %d sentences\n",
+		len(suspect)-len(sample), len(sample), len(rest), len(suspect), len(seen))
+	return subsetBySrc(sentences, subset), sample
+}
+
+// reportCalibration prints the judge flag rate inside the random calibration
+// sample — the estimate of what the scoped judge is missing in the skipped
+// population. A rate well above the suspect set's residual means the scope
+// filter is too narrow.
+func reportCalibration(sample, flagged []string) {
+	if len(sample) == 0 {
+		return
+	}
+	fset := make(map[string]bool, len(flagged))
+	for _, src := range flagged {
+		fset[src] = true
+	}
+	n := 0
+	for _, src := range sample {
+		if fset[src] {
+			n++
+		}
+	}
+	fmt.Printf("Judge calibration sample: %d/%d flagged (%.1f%%) among sentences the scope filter considered clean\n",
+		n, len(sample), 100*float64(n)/float64(len(sample)))
+}
+
+// localCoverage mirrors tbook's assembly-time coverage score for cache entries
+// that carry no Q (LLM-aligned ones): the fraction of rendered translation
+// words whose chunk maps to ≥1 source word. 0 when nothing is aligned.
+func localCoverage(tr tbook.Translation) float64 {
+	if tr.Text == "" || len(tr.Align) == 0 {
+		return 0
+	}
+	runes := []rune(tr.Text)
+	words, aligned := 0, 0
+	for _, c := range tr.Align {
+		a, b := c.T[0], c.T[1]
+		if a < 0 {
+			a = 0
+		}
+		if b > len(runes) {
+			b = len(runes)
+		}
+		if a >= b {
+			continue
+		}
+		hasLD := false
+		for _, r := range runes[a:b] {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				hasLD = true
+				break
+			}
+		}
+		if !hasLD {
+			continue
+		}
+		words++
+		if len(c.W) > 0 {
+			aligned++
+		}
+	}
+	if words == 0 {
+		return 0
+	}
+	return float64(aligned) / float64(words)
 }
 
 // clientOptions builds the LLM client options shared by every pass
@@ -329,6 +496,7 @@ func clientOptions(cfg *config.Config, model string, temperature float64) transl
 		Temperature: temperature, JSONMode: cfg.JSONMode,
 		MaxRetries: cfg.MaxRetries, Timeout: cfg.Timeout,
 		ProviderSort: cfg.ProviderSort, ProviderOrder: cfg.ProviderOrder,
+		Stats: statsLog,
 	}
 }
 
@@ -566,8 +734,9 @@ func runJudge(ctx context.Context, cfg *config.Config, sentences []*tbook.Senten
 	jc := translate.NewClient(clientOptions(cfg, cfg.JudgeModel, 0))
 	fmt.Printf("Judging translations via %s ...\n", cfg.JudgeModel)
 	// Judge batches are smaller than translate batches: each item carries the
-	// full alignment, and verdict quality drops with oversized prompts.
-	batch := max(1, cfg.BatchSize/2)
+	// full alignment, and verdict quality drops with oversized prompts (capped
+	// at 16 so a big --batch-size doesn't degrade verdicts).
+	batch := max(1, min(16, cfg.BatchSize/2))
 	rep, err := translate.Judge(ctx, jc, cfg.CacheDir, cfg.Source, cfg.Targets, sentences, batch, cfg.Concurrency)
 	if err != nil {
 		return nil, err
