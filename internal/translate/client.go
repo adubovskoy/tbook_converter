@@ -49,6 +49,11 @@ type Options struct {
 	// https://openrouter.ai/docs/features/provider-routing.
 	ProviderSort  string
 	ProviderOrder []string
+
+	// Stats, when non-nil, receives one JSONL record per request attempt
+	// (latency, status, tokens, cost, serving provider). Also switches on
+	// OpenRouter usage accounting in responses.
+	Stats *Stats
 }
 
 // Client calls the OpenRouter chat-completions API with retry/backoff.
@@ -57,9 +62,14 @@ type Client struct {
 	http *http.Client
 }
 
-// NewClient builds a client. Timeout applies per HTTP request.
+// NewClient builds a client. Timeout applies per HTTP request. The transport
+// keeps a generous idle-connection pool so high --concurrency doesn't churn
+// TCP/TLS between request waves (requests multiplex over HTTP/2 anyway; this
+// is insurance for HTTP/1.1 fallback).
 func NewClient(o Options) *Client {
-	return &Client{opts: o, http: &http.Client{Timeout: o.Timeout}}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConnsPerHost = 64
+	return &Client{opts: o, http: &http.Client{Timeout: o.Timeout, Transport: tr}}
 }
 
 type message struct {
@@ -73,6 +83,11 @@ type chatRequest struct {
 	Temperature    float64         `json:"temperature"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 	Provider       *providerPrefs  `json:"provider,omitempty"`
+	Usage          *usageOpt       `json:"usage,omitempty"` // OpenRouter usage accounting (cost per request)
+}
+
+type usageOpt struct {
+	Include bool `json:"include"`
 }
 
 type responseFormat struct {
@@ -88,12 +103,18 @@ type providerPrefs struct {
 }
 
 type chatResponse struct {
-	Choices []struct {
+	Provider string `json:"provider"` // serving provider (OpenRouter)
+	Choices  []struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int     `json:"prompt_tokens"`
+		CompletionTokens int     `json:"completion_tokens"`
+		Cost             float64 `json:"cost"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -120,9 +141,10 @@ func (e *apiError) permanent() bool {
 // Retry-After on 429. Permanent HTTP statuses and a subscription usage limit
 // (*UsageLimitError) are not retried.
 func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(content string) error) error {
-	var send func(ctx context.Context) (string, time.Duration, error)
+	var send func(ctx context.Context, rec *statRec) (string, time.Duration, error)
 	if c.opts.Provider == ProviderClaude {
-		send = func(ctx context.Context) (string, time.Duration, error) {
+		send = func(ctx context.Context, rec *statRec) (string, time.Duration, error) {
+			rec.Provider = "claude-cli"
 			return c.claudeOnce(ctx, system, userJSON)
 		}
 	} else {
@@ -137,15 +159,20 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 		if c.opts.ProviderSort != "" || len(c.opts.ProviderOrder) > 0 {
 			req.Provider = &providerPrefs{Sort: c.opts.ProviderSort, Order: c.opts.ProviderOrder}
 		}
+		if c.opts.Stats != nil {
+			req.Usage = &usageOpt{Include: true}
+		}
 		payload, err := json.Marshal(req)
 		if err != nil {
 			return err
 		}
-		send = func(ctx context.Context) (string, time.Duration, error) {
-			return c.once(ctx, payload)
+		send = func(ctx context.Context, rec *statRec) (string, time.Duration, error) {
+			rec.ReqBytes = len(payload)
+			return c.once(ctx, payload, rec)
 		}
 	}
 
+	phase := phaseOf(ctx)
 	var lastErr error
 	var wait time.Duration
 	for attempt := 0; attempt <= c.opts.MaxRetries; attempt++ {
@@ -156,8 +183,13 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 				return ctx.Err()
 			}
 		}
-		content, retryAfter, err := send(ctx)
+		rec := &statRec{TS: nowTS(), Model: c.opts.Model, Phase: phase, Attempt: attempt}
+		start := time.Now()
+		content, retryAfter, err := send(ctx, rec)
+		rec.LatencyMS = time.Since(start).Milliseconds()
 		if err != nil {
+			rec.Err = clip(err.Error(), 200)
+			c.opts.Stats.log(rec)
 			lastErr = err
 			if ae, ok := err.(*apiError); ok && ae.permanent() {
 				return err
@@ -172,10 +204,13 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 			continue
 		}
 		if perr := parse(content); perr != nil {
+			rec.Err = clip("parse: "+perr.Error(), 200)
+			c.opts.Stats.log(rec)
 			lastErr = fmt.Errorf("parse response: %w", perr)
 			wait = backoff(attempt, 0)
 			continue
 		}
+		c.opts.Stats.log(rec)
 		return nil
 	}
 	return lastErr
@@ -359,7 +394,13 @@ func (c *Client) TranslateText(ctx context.Context, system, userJSON string) (ma
 	return out, err
 }
 
-func (c *Client) once(ctx context.Context, payload []byte) (string, time.Duration, error) {
+// errTruncated marks a completion the provider cut off (finish_reason
+// "length"): the batch likely exceeds the provider's output cap. Retryable —
+// OpenRouter may route the retry to a provider with a higher cap — but a batch
+// that keeps truncating burns its rounds; watch finish_reason in --stats.
+var errTruncated = errors.New("completion truncated (finish_reason=length) — batch may exceed the provider's output cap")
+
+func (c *Client) once(ctx context.Context, payload []byte, rec *statRec) (string, time.Duration, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
 		return "", 0, err
@@ -379,6 +420,8 @@ func (c *Client) once(ctx context.Context, payload []byte) (string, time.Duratio
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	rec.Status = resp.StatusCode
+	rec.RespBytes = len(body)
 
 	if resp.StatusCode/100 != 2 {
 		ra := parseRetryAfter(resp.Header.Get("Retry-After"))
@@ -397,8 +440,18 @@ func (c *Client) once(ctx context.Context, payload []byte) (string, time.Duratio
 	if err := json.Unmarshal(body, &cr); err != nil {
 		return "", 0, err
 	}
+	rec.Provider = cr.Provider
+	if cr.Usage != nil {
+		rec.PromptTok = cr.Usage.PromptTokens
+		rec.OutputTok = cr.Usage.CompletionTokens
+		rec.Cost = cr.Usage.Cost
+	}
 	if len(cr.Choices) == 0 {
 		return "", 0, fmt.Errorf("no choices in response")
+	}
+	rec.FinishReason = cr.Choices[0].FinishReason
+	if cr.Choices[0].FinishReason == "length" {
+		return "", 0, errTruncated
 	}
 	return cr.Choices[0].Message.Content, 0, nil
 }

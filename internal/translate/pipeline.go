@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dimando/reader/converter/internal/align"
 	"github.com/dimando/reader/converter/internal/cache"
@@ -45,6 +46,20 @@ const DefaultEmbQMin = 0.7
 type WordAligner interface {
 	Align(srcWords, tgtWords []string) ([][2]int, error)
 }
+
+// BatchWordAligner is the optional batched fast path (satisfied by
+// *embalign.Aligner): many sentence pairs per request, encoded by the child in
+// one padded forward pass per side — ~2x faster than per-sentence on CPU. A
+// nil per-item result marks that item's failure (gated like a low-Q alignment).
+type BatchWordAligner interface {
+	AlignBatch(srcs, tgts [][]string) ([][][2]int, error)
+}
+
+// embBatchSize is the embedding-aligner request size. The child encodes each
+// request in length-sorted padded sub-batches of 32; a large request gives the
+// sort enough spread to group similar lengths (measured ~1.9x over unsorted on
+// real book sentences).
+const embBatchSize = 256
 
 // Pipeline translates sentences into the cache via OpenRouter.
 type Pipeline struct {
@@ -220,9 +235,13 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 
 	if len(needTr) > 0 {
 		sys := translateSystemPrompt(LangName(p.Source), LangName(target), p.Glossary)
+		t0 := time.Now()
 		if err := p.runPhase(ctx, sys, needTr, target, phaseTranslate); err != nil {
 			return err
 		}
+		el := time.Since(t0)
+		fmt.Printf("[%s] translate phase: %d sentences in %s (%.1f sent/s)\n",
+			target, len(needTr), el.Round(time.Second), float64(len(needTr))/el.Seconds())
 	}
 	// Sentences just translated are now alignable. Force must NOT propagate
 	// here: force means "redo, don't trust the cache" — but the raw translation
@@ -235,9 +254,13 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 		}
 		if len(needAl) > 0 {
 			sys := alignSystemPrompt(LangName(p.Source), LangName(target))
+			t0 := time.Now()
 			if err := p.runPhase(ctx, sys, needAl, target, phaseAlign); err != nil {
 				return err
 			}
+			el := time.Since(t0)
+			fmt.Printf("[%s] LLM align phase: %d sentences in %s (%.1f sent/s)\n",
+				target, len(needAl), el.Round(time.Second), float64(len(needAl))/el.Seconds())
 		}
 	}
 	return nil
@@ -257,52 +280,110 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 	}
 	bar := progressbar.Default(int64(len(items)), "embalign")
 	aligned, gated := 0, 0
-	for i, it := range items {
-		if ctx.Err() != nil {
-			break
+	t0 := time.Now()
+
+	type prep struct {
+		it      item
+		text    string
+		trWords [][2]int
+	}
+	batcher, canBatch := p.EmbAligner.(BatchWordAligner)
+	dead := false
+	next := 0 // first item not yet processed (for the dead-aligner tail)
+
+	for start := 0; start < len(items) && !dead && ctx.Err() == nil; start += embBatchSize {
+		end := min(start+embBatchSize, len(items))
+		next = end
+		preps := make([]prep, 0, end-start)
+		for _, it := range items[start:end] {
+			raw, ok := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, model))
+			if !ok || strings.TrimSpace(raw.Text) == "" {
+				_ = bar.Add(1)
+				continue // no raw translation to align; ships via the raw fallback
+			}
+			text := ensureListPrefix(it.s.Src, raw.Text)
+			preps = append(preps, prep{it: it, text: text, trWords: segment.Tokenize(text)})
 		}
-		raw, ok := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, model))
-		if !ok || strings.TrimSpace(raw.Text) == "" {
-			_ = bar.Add(1)
-			continue // no raw translation to align; ships via the raw fallback
+		if len(preps) == 0 {
+			continue
 		}
-		text := ensureListPrefix(it.s.Src, raw.Text)
-		trWords := segment.Tokenize(text)
-		pairs, err := p.EmbAligner.Align(
-			embalign.WordStrings(it.s.Src, it.s.Words),
-			embalign.WordStrings(text, trWords))
-		if err != nil {
-			if errors.Is(err, embalign.ErrDead) {
-				fmt.Printf("[%s] embedding aligner died (%v) — %d sentences fall back to the LLM align pass\n",
-					target, err, len(items)-i)
-				if p.AlignMode == AlignHybrid {
-					leftover = append(leftover, items[i:]...)
+		srcs := make([][]string, len(preps))
+		tgts := make([][]string, len(preps))
+		for i, pr := range preps {
+			srcs[i] = embalign.WordStrings(pr.it.s.Src, pr.it.s.Words)
+			tgts[i] = embalign.WordStrings(pr.text, pr.trWords)
+		}
+
+		// Batched fast path; per-sentence fallback covers non-batch aligners and
+		// a child that rejects the batch protocol (old script). A nil per-item
+		// result — failure or death mid-chunk — gates that sentence.
+		var results [][][2]int
+		if canBatch {
+			res, err := batcher.AlignBatch(srcs, tgts)
+			switch {
+			case err == nil:
+				results = res
+			case errors.Is(err, embalign.ErrDead):
+				dead = true
+			default:
+				canBatch = false // protocol failure: stop batching, go per-sentence
+			}
+		}
+		if results == nil && !dead {
+			results = make([][][2]int, len(preps))
+			for i := range preps {
+				pairs, err := p.EmbAligner.Align(srcs[i], tgts[i])
+				if err != nil {
+					if errors.Is(err, embalign.ErrDead) {
+						dead = true
+						break
+					}
+					continue // per-sentence failure: results[i] stays nil → gated
 				}
-				break
+				if pairs == nil {
+					pairs = [][2]int{}
+				}
+				results[i] = pairs
 			}
-			// Per-sentence failure: gate it like a low-quality alignment.
-			if p.AlignMode == AlignHybrid {
-				leftover = append(leftover, it)
+		}
+
+		for i, pr := range preps {
+			var pairs [][2]int
+			if results != nil {
+				pairs = results[i]
+			}
+			if pairs == nil { // failed or unprocessed: gate like a low-Q alignment
+				if p.AlignMode == AlignHybrid {
+					leftover = append(leftover, pr.it)
+					gated++
+				}
+				_ = bar.Add(1)
+				continue
+			}
+			chunks, q := embalign.Chunks(pairs, pr.trWords)
+			tr := tbook.Translation{Text: pr.text, Align: chunks, Q: q}
+			if p.AlignMode == AlignHybrid && p.rejectEmbedded(dict, pr.it.s, tr, target) {
+				leftover = append(leftover, pr.it)
 				gated++
+				_ = bar.Add(1)
+				continue
 			}
+			_ = cache.Write(p.CacheDir, pr.it.key, tr)
+			aligned++
 			_ = bar.Add(1)
-			continue
 		}
-		chunks, q := embalign.Chunks(pairs, trWords)
-		tr := tbook.Translation{Text: text, Align: chunks, Q: q}
-		if p.AlignMode == AlignHybrid && p.rejectEmbedded(dict, it.s, tr, target) {
-			leftover = append(leftover, it)
-			gated++
-			_ = bar.Add(1)
-			continue
+	}
+	if dead && next < len(items) {
+		fmt.Printf("[%s] embedding aligner died — %d sentences fall back to the LLM align pass\n",
+			target, len(items)-next)
+		if p.AlignMode == AlignHybrid {
+			leftover = append(leftover, items[next:]...)
 		}
-		_ = cache.Write(p.CacheDir, it.key, tr)
-		aligned++
-		_ = bar.Add(1)
 	}
 	_ = bar.Finish()
-	fmt.Printf("[%s] embedding-aligned %d sentences locally; %d gated to the LLM align pass\n",
-		target, aligned, gated)
+	el := time.Since(t0)
+	fmt.Printf("[%s] embedding-aligned %d sentences locally; %d gated to the LLM align pass (%s, %.1f sent/s)\n",
+		target, aligned, gated, el.Round(time.Second), float64(len(items))/el.Seconds())
 	return leftover
 }
 
@@ -456,8 +537,16 @@ func (p *Pipeline) phaseBatches(ctx context.Context, system string, items []item
 // doBatch runs one batch. Its returned error is non-nil ONLY for failures that
 // must abort the run (usage limit) — ordinary batch failures return nil and
 // are retried by the round loop.
+//
+// Items are sent under short per-batch ids ("1".."n"), never the 64-hex cache
+// keys: a cheap model reliably echoes short ids where long ones get mangled or
+// dropped (the judge learned this first), and ids are echoed in BOTH request
+// and reply — at batch 16 the hex keys alone were ~30% of translate tokens.
 func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, target string, ph phase, bar *progressbar.ProgressBar) error {
 	model := p.cacheModel()
+	ctx = WithPhase(ctx, ph.String())
+	// Progress-bar statistics: a sentence counts as done when its phase's cache
+	// entry exists (the same check the round loop uses).
 	defer func() {
 		successCount := 0
 		for _, it := range batch {
@@ -473,15 +562,19 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 		p.addBatchResult(bar, ph.String(), failCount, successCount)
 	}()
 
-	byKey := make(map[string]*tbook.Sentence, len(batch))
-	for _, it := range batch {
-		byKey[it.key] = it.s
+	// byID resolves an echoed short id back to the batch item.
+	byID := func(id string) (item, bool) {
+		n, err := strconv.Atoi(strings.TrimSpace(id))
+		if err != nil || n < 1 || n > len(batch) {
+			return item{}, false
+		}
+		return batch[n-1], true
 	}
 
 	if ph == phaseTranslate {
 		inputs := make([]translateInput, len(batch))
 		for i, it := range batch {
-			inputs[i] = translateInput{ID: it.key, Src: it.s.Src}
+			inputs[i] = translateInput{ID: strconv.Itoa(i + 1), Src: it.s.Src}
 		}
 		userJSON, err := jsonx.Marshal(inputs)
 		if err != nil {
@@ -493,20 +586,20 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 			return abortOnly(err)
 		}
 		for id, text := range out {
-			s, ok := byKey[id]
+			it, ok := byID(id)
 			if !ok {
 				continue
 			}
 			if text = strings.TrimSpace(text); text == "" || suspiciousTranslation(text) {
 				continue // dropped/artifact output — retried next round
 			}
-			_ = cache.Write(p.CacheDir, cache.TrKey(s.Src, p.Source, target, model),
+			_ = cache.Write(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, model),
 				tbook.Translation{Text: text})
 			// The final aligned entry is DERIVED from the raw translation just
 			// replaced — drop it or the align phase would skip the sentence and
 			// FillFromCache would keep serving the stale text (this is how
 			// escalated sentences used to ship with the old model's content).
-			cache.Remove(p.CacheDir, id)
+			cache.Remove(p.CacheDir, it.key)
 		}
 		return nil
 	}
@@ -515,7 +608,7 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 	inputs := make([]alignInput, len(batch))
 	for i, it := range batch {
 		tr, _ := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, model))
-		inputs[i] = alignInput{ID: it.key, Src: it.s.Src, Words: numberedWords(it.s),
+		inputs[i] = alignInput{ID: strconv.Itoa(i + 1), Src: it.s.Src, Words: numberedWords(it.s),
 			Tr: ensureListPrefix(it.s.Src, tr.Text)}
 	}
 	userJSON, err := jsonx.Marshal(inputs)
@@ -527,12 +620,8 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 		p.noteErr(err)
 		return abortOnly(err)
 	}
-	rawByKey := make(map[string]string, len(batch))
-	for i, it := range batch {
-		rawByKey[it.key] = inputs[i].Tr
-	}
 	for id, chunks := range out {
-		s, ok := byKey[id]
+		it, ok := byID(id)
 		if !ok {
 			continue
 		}
@@ -541,11 +630,12 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 		// (unlocatable mapped fragment) returns the zero Translation — retried
 		// next round; a sentence that never aligns still ships via the
 		// raw-translation fallback in FillFromCache.
-		tr := align.BuildTextAlign(chunks, s.Src, s.Words, rawByKey[id])
+		n, _ := strconv.Atoi(strings.TrimSpace(id))
+		tr := align.BuildTextAlign(chunks, it.s.Src, it.s.Words, inputs[n-1].Tr)
 		if tr.Text == "" {
 			continue
 		}
-		_ = cache.Write(p.CacheDir, id, tr)
+		_ = cache.Write(p.CacheDir, it.key, tr)
 	}
 	return nil
 }

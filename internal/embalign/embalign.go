@@ -86,10 +86,20 @@ type request struct {
 	Tgt []string `json:"tgt"`
 }
 
-type response struct {
-	Ready bool     `json:"ready"`
+type batchRequest struct {
+	Batch []request `json:"batch"`
+}
+
+type itemResult struct {
 	Pairs [][2]int `json:"pairs"`
 	Error string   `json:"error"`
+}
+
+type response struct {
+	Ready   bool         `json:"ready"`
+	Pairs   [][2]int     `json:"pairs"`
+	Results []itemResult `json:"results"`
+	Error   string       `json:"error"`
 }
 
 // maxLine bounds one response line (pair lists are small; this is headroom).
@@ -152,6 +162,49 @@ func (a *Aligner) Align(srcWords, tgtWords []string) ([][2]int, error) {
 		return nil, fmt.Errorf("embedding aligner: %s", resp.Error)
 	}
 	return resp.Pairs, nil
+}
+
+// AlignBatch aligns many sentence pairs in one request: the child encodes all
+// sources in one padded forward pass (likewise targets), ~2x faster on CPU
+// than per-sentence calls. Returns per-item pair lists. The error is
+// request-level (a dead process wraps ErrDead; an old single-pair-only child
+// returns a plain error — callers may fall back to Align).
+func (a *Aligner) AlignBatch(srcs, tgts [][]string) ([][][2]int, error) {
+	if len(srcs) != len(tgts) {
+		return nil, fmt.Errorf("embalign: %d sources vs %d targets", len(srcs), len(tgts))
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	req := batchRequest{Batch: make([]request, len(srcs))}
+	for i := range srcs {
+		req.Batch[i] = request{Src: srcs[i], Tgt: tgts[i]}
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := a.in.Write(append(b, '\n')); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDead, err)
+	}
+	resp, err := a.readResponse()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDead, err)
+	}
+	if resp.Error != "" {
+		return nil, fmt.Errorf("embedding aligner: %s", resp.Error)
+	}
+	if len(resp.Results) != len(srcs) {
+		return nil, fmt.Errorf("embedding aligner: %d results for %d items", len(resp.Results), len(srcs))
+	}
+	out := make([][][2]int, len(resp.Results))
+	for i, r := range resp.Results {
+		if r.Error != "" {
+			out[i] = nil // per-item failure: caller gates the sentence
+			continue
+		}
+		out[i] = r.Pairs
+	}
+	return out, nil
 }
 
 func (a *Aligner) readResponse() (response, error) {

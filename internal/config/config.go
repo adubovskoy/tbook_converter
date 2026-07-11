@@ -60,18 +60,27 @@ type Config struct {
 	SkipCitations bool     // don't translate citation-kind notes (kept untranslated)
 
 	// Quality passes.
-	Glossary        bool   // build a book glossary and enforce it during translation
+	Glossary        bool   // build a book glossary and enforce it during translation (default on; --no-glossary disables)
 	Judge           bool   // run the semantic verification pass after translating
 	JudgeModel      string // model for the judge pass (default: same as Model)
+	JudgeScope      string // "flagged" (default): judge only lexcheck-flagged + low-coverage sentences + a small calibration sample | "all"
 	JudgeInvalidate bool   // immediately clear cache for judge-flagged sentences
 	EscalateModel   string // with --judge/--lexcheck: redo flagged sentences with this stronger model, in place
 	Lexcheck        bool   // static dictionary-based drift check
 	LexiconDir      string // directory of compact lexicons (tools/fetch-lexicons.sh)
 
-	// Alignment pass. "llm" = LLM align pass (default); "emb" = local embedding
-	// aligner only; "hybrid" = embedding aligner with LLM fallback for gated
-	// sentences (see embalign-report.md and tools/embalign-setup.sh).
-	AlignMode string
+	// StatsPath, when set, appends one JSONL record per LLM request attempt
+	// (latency, status, tokens, cost, provider) for offline analysis.
+	StatsPath string
+
+	// Alignment pass. "hybrid" (default) = local embedding aligner with LLM
+	// fallback for gated sentences; "emb" = embedding aligner only; "llm" =
+	// LLM align pass (see the speed report in issue #2 and tools/embalign-setup.sh).
+	// AlignModeExplicit records whether the user chose the mode (flag or env):
+	// an explicit emb/hybrid fails hard when the aligner can't start, while the
+	// hybrid default degrades to llm with a notice.
+	AlignMode         string
+	AlignModeExplicit bool
 	EmbPython string  // interpreter for tools/embalign.py ("" = auto: EMBALIGN_PYTHON, .venv-embalign, python3)
 	EmbScript string  // aligner script path
 	EmbModel  string  // HF encoder id
@@ -118,7 +127,7 @@ func Load(args []string) (*Config, error) {
 	cacheDir := fs.String("cache-dir", envOr("CACHE_DIR", ".tbook_cache"), "translation cache directory")
 	batchSize := fs.Int("batch-size", envInt("BATCH_SIZE", 16), "sentences per API request")
 	alignBatch := fs.Int("align-batch", envInt("ALIGN_BATCH", 0), "sentences per ALIGN request (0 = batch-size/4; small align batches curb positional drift)")
-	concurrency := fs.Int("concurrency", envInt("CONCURRENCY", 6), "parallel API requests")
+	concurrency := fs.Int("concurrency", envInt("CONCURRENCY", 32), "parallel API requests (gemini via OpenRouter took 48 with zero 429s; lower for :free models)")
 	maxRetries := fs.Int("max-retries", envInt("MAX_RETRIES", 4), "per-request retry attempts")
 	limit := fs.Int("limit-chapters", 0, "only convert the first N chapters (0 = all)")
 	dryRun := fs.Bool("dry-run", false, "parse + segment only; no API calls, no output")
@@ -130,9 +139,14 @@ func Load(args []string) (*Config, error) {
 	noImages := fs.Bool("no-images", false, "drop body images (no figures in the output)")
 	noNotes := fs.Bool("no-notes", false, "drop footnotes entirely (markers are still stripped from prose)")
 	skipCitations := fs.Bool("skip-citations", false, "leave citation-kind footnotes untranslated (saves tokens)")
-	glossary := fs.Bool("glossary", false, "build a book glossary first and enforce it during translation for term consistency")
+	// Glossary is one extra call and keeps recurring terms consistent; it runs
+	// by default — --no-glossary opts out (e.g. to reuse a pre-glossary cache,
+	// whose keys carry no glossary hash). --glossary is kept as an accepted no-op.
+	_ = fs.Bool("glossary", true, "(default; deprecated) build a book glossary and enforce it during translation — on unless --no-glossary")
+	noGlossary := fs.Bool("no-glossary", envBool("NO_GLOSSARY", false), "skip the book glossary (also reuses caches from pre-glossary runs)")
 	judge := fs.Bool("judge", false, "after translating, run an independent LLM judge over every sentence; write flagged sources to <out>.flagged.json")
 	judgeModel := fs.String("judge-model", envOr("JUDGE_MODEL", ""), "model for the judge pass (default: same as --model; see README before pointing it at a stronger model)")
+	judgeScope := fs.String("judge-scope", envOr("JUDGE_SCOPE", "flagged"), "with --judge: flagged (default: only lexcheck-flagged + low-coverage sentences, plus a 5% calibration sample) | all (every sentence)")
 	judgeInvalidate := fs.Bool("judge-invalidate", false, "with --judge: immediately clear cache for flagged sentences so the next run redoes them")
 	escalateModel := fs.String("escalate-model", envOr("ESCALATE_MODEL", ""), "with --judge/--lexcheck: immediately redo flagged sentences with this stronger model (kept in the primary cache namespace)")
 	// Lexcheck is free (offline) and runs by default; --no-lexcheck opts out.
@@ -140,14 +154,15 @@ func Load(args []string) (*Config, error) {
 	_ = fs.Bool("lexcheck", true, "(default; deprecated) static lexicon drift check — on unless --no-lexcheck")
 	noLexcheck := fs.Bool("no-lexcheck", envBool("NO_LEXCHECK", false), "disable the default static lexicon drift check")
 	lexiconDir := fs.String("lexicons", envOr("LEXICON_DIR", "lexicons"), "lexicon directory for the drift check")
-	alignMode := fs.String("align-mode", envOr("ALIGN_MODE", AlignLLM),
-		"alignment pass: llm (default) | emb (local embedding aligner, no LLM align) | hybrid (embedding aligner + LLM fallback for gated sentences)")
+	alignMode := fs.String("align-mode", envOr("ALIGN_MODE", AlignHybrid),
+		"alignment pass: hybrid (default: local embedding aligner + LLM fallback for gated sentences) | emb (embedding aligner only) | llm (LLM align pass)")
 	embPython := fs.String("embalign-python", envOr("EMBALIGN_PYTHON", ""), "python for the embedding aligner (default: .venv-embalign/bin/python if present, else python3; see tools/embalign-setup.sh)")
 	embScript := fs.String("embalign-script", envOr("EMBALIGN_SCRIPT", "tools/embalign.py"), "embedding aligner script")
 	embModel := fs.String("embalign-model", envOr("EMBALIGN_MODEL", "sentence-transformers/LaBSE"), "embedding aligner encoder (HF model id)")
 	embLayer := fs.Int("embalign-layer", envInt("EMBALIGN_LAYER", 8), "embedding aligner hidden layer")
 	embMethod := fs.String("embalign-method", envOr("EMBALIGN_METHOD", "argmax"), "embedding aligner matching: argmax (precision-first) | itermax (recall-first)")
 	embQ := fs.Float64("embalign-q", envFloat("EMBALIGN_Q", 0.7), "hybrid gate: alignment-coverage threshold below which the LLM align pass redoes the sentence")
+	stats := fs.String("stats", envOr("STATS_PATH", ""), "append per-request metrics (latency, status, tokens, cost) as JSONL to this file")
 	providerSort := fs.String("provider-sort", envOr("PROVIDER_SORT", ""), "OpenRouter provider routing: throughput (fastest tokens/sec) | latency | price (empty = default routing)")
 	providerOrder := fs.String("provider-order", envOr("PROVIDER_ORDER", ""), "pin OpenRouter providers by slug, comma-separated in priority order (e.g. alibaba)")
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
@@ -205,10 +220,12 @@ func Load(args []string) (*Config, error) {
 		NoImages:        *noImages,
 		NoNotes:         *noNotes,
 		SkipCitations:   *skipCitations,
-		Glossary:        *glossary,
+		Glossary:        !*noGlossary,
 		Judge:           *judge,
 		JudgeModel:      *judgeModel,
+		JudgeScope:      strings.ToLower(strings.TrimSpace(*judgeScope)),
 		JudgeInvalidate: *judgeInvalidate,
+		StatsPath:       *stats,
 		EscalateModel:   *escalateModel,
 		Lexcheck:        !*noLexcheck,
 		LexiconDir:      *lexiconDir,
@@ -226,6 +243,17 @@ func Load(args []string) (*Config, error) {
 	}
 	if cfg.AlignMode != AlignLLM && cfg.AlignMode != AlignEmb && cfg.AlignMode != AlignHybrid {
 		return nil, fmt.Errorf("unknown --align-mode %q (want llm, emb or hybrid)", cfg.AlignMode)
+	}
+	// Explicit align-mode choice (flag or env) fails hard when the local
+	// aligner is missing; the built-in hybrid default degrades to llm instead.
+	cfg.AlignModeExplicit = os.Getenv("ALIGN_MODE") != ""
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "align-mode" {
+			cfg.AlignModeExplicit = true
+		}
+	})
+	if cfg.JudgeScope != JudgeScopeAll && cfg.JudgeScope != JudgeScopeFlagged {
+		return nil, fmt.Errorf("unknown --judge-scope %q (want all or flagged)", cfg.JudgeScope)
 	}
 	// The model default follows the provider, each with its own env var — the
 	// MODEL in .env is an OpenRouter id and must never leak into the claude
@@ -299,6 +327,12 @@ const (
 	AlignLLM    = "llm"
 	AlignEmb    = "emb"
 	AlignHybrid = "hybrid"
+)
+
+// Judge scopes.
+const (
+	JudgeScopeAll     = "all"     // judge every translated sentence
+	JudgeScopeFlagged = "flagged" // judge lexcheck-flagged + low-coverage + calibration sample
 )
 
 // Per-provider model defaults.

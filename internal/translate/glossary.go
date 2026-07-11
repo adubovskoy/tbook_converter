@@ -62,7 +62,7 @@ func BuildGlossary(ctx context.Context, c *Client, cacheDir string, sentences []
 		Glossary []GlossEntry `json:"glossary"`
 	}
 	sys := glossarySystemPrompt(LangName(source), LangName(target))
-	if err := c.ChatJSON(ctx, sys, string(userJSON), &out); err != nil {
+	if err := c.ChatJSON(WithPhase(ctx, "glossary"), sys, string(userJSON), &out); err != nil {
 		return nil, "", err
 	}
 	// Keep only usable entries, deterministic order.
