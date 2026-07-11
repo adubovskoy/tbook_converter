@@ -106,11 +106,58 @@ def align_pair(model, tokenizer, src_words, tgt_words, layer, method):
     return align_batch(model, tokenizer, [(src_words, tgt_words)], layer, method)[0]
 
 
+# GLUE_MIN gates the idiom-glue step (0 disables): an uncovered source word is
+# attached to a target word when (a) a nearby source word already maps
+# there (±3 covers split phrasal particles), (b) that target is the uncovered
+# word's own best match, and (c) their
+# word-level similarity clears this floor. Catches phrasal verbs / idioms that
+# translate as one word ("gave up" -> "бросил" claims both words), which mutual
+# argmax alone cannot express when the target word has too few subwords.
+GLUE_MIN = float(os.environ.get("EMBALIGN_GLUE_MIN", "0.3"))
+
+
+def glue_idioms(word_pairs, sim, s_wids, t_wids):
+    """Add (uncovered-src-word, tgt-word) pairs per the GLUE_MIN contract.
+    Only ever ADDS pairs; the mutual-argmax set is preserved. Local indices."""
+    if GLUE_MIN <= 0 or not word_pairs:
+        return word_pairs
+    row_w = np.array(s_wids)
+    col_w = np.array(t_wids)
+    n_src = row_w.max() + 1
+    tgt_of = {}
+    for s, t in word_pairs:
+        tgt_of.setdefault(s, set()).add(t)
+    added = []
+    for wi in range(n_src):
+        if wi in tgt_of:
+            continue
+        neigh = set()
+        for d in (-3, -2, -1, 1, 2, 3):
+            neigh |= tgt_of.get(wi + d, set())
+        if not neigh:
+            continue
+        sub = sim[row_w == wi]  # this word's subword rows
+        if sub.size == 0:
+            continue
+        col_best = sub.max(axis=0)  # best sim per target subword
+        # word-level sim per target word
+        tj_best, v_best = -1, -1.0
+        for tj in np.unique(col_w):
+            v = col_best[col_w == tj].max()
+            if v > v_best:
+                tj_best, v_best = int(tj), float(v)
+        if tj_best in neigh and v_best >= GLUE_MIN:
+            added.append([wi, tj_best])
+    return sorted(word_pairs + added)
+
+
 def match_pairs(sv, s_wids, tv, t_wids, s_map, t_map, method):
     """Similarity + argmax matching for one encoded pair -> [s, t] word pairs."""
     sim = sv @ tv.T
     sub = itermax_pairs(sim) if method == "itermax" else argmax_pairs(sim)
-    return [[s_map[s], t_map[t]] for s, t in to_word_pairs(sub, s_wids, t_wids)]
+    local = [[s, t] for s, t in to_word_pairs(sub, s_wids, t_wids)]
+    local = glue_idioms(local, sim, s_wids, t_wids)
+    return [[s_map[s], t_map[t]] for s, t in local]
 
 
 def encode_sorted(model, tokenizer, word_lists, layer, sub_batch=32):

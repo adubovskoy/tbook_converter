@@ -78,6 +78,13 @@ For EACH item, break tr into chunks at WORD GRANULARITY — ONE chunk per {TGT} 
   copula) takes "en":[]. NEVER attach an inserted word to some {SRC} word — that steals it
   and shifts every later pair (the #1 defect).
 - A multi-word {SRC} unit is several entries: {"tgt":"гостиную","en":["4:living","5:room"]}.
+- IDIOMS, PHRASAL VERBS, FIXED EXPRESSIONS: when a {SRC} expression is rendered by fewer
+  {TGT} words (often one), map EVERY word of the expression to that {TGT} word — e.g.
+  src "Piss off, John.", tr "Отвали, Джон.":
+  [{"tgt":"Отвали,","en":["0:Piss","1:off"]},{"tgt":"Джон.","en":["2:John"]}].
+  This includes split verb+particle pairs ("gave it up": the {TGT} verb takes both
+  "gave" and "up"). Never leave a particle of a translated expression unmapped or
+  attached to a neighboring word it does not translate.
 - The same {SRC} word may appear in several chunks; some {SRC} words (articles, function
   words absorbed by {TGT} grammar) may appear in none.
 - When a {SRC} word occurs MORE THAN ONCE, pick the occurrence from the SAME clause as the

@@ -123,6 +123,13 @@ highlights but can never rewrite the text. Everything is cached per sentence
 (`promptVersion|model|source|target|src`), so runs resume and contract bumps
 re-align without re-translating.
 
+Idioms and phrasal verbs map as units: "piss off" → "отвали" claims both
+source words (tapping either highlights the pair). The LLM align prompt has an
+explicit fixed-expression rule, and the local aligner glues uncovered
+expression words to a neighbor's target when embeddings support it
+(`EMBALIGN_GLUE_MIN`, default 0.3; 0 disables) — measured +17pp source-word
+tap coverage on a real novel with no drift-detection regression.
+
 Full details: [the speed report](https://github.com/adubovskoy/tbook_converter/issues/2) (measurements & tuning),
 [`../doc/specs/tbook-format.md`](../doc/specs/tbook-format.md) (format),
 [`../doc/specs/article.md`](../doc/specs/article.md) (design history).
