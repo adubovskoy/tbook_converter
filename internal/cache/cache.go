@@ -16,13 +16,16 @@ import (
 )
 
 // PromptVersion keys the ALIGN production contract; bump only if the alignment
-// rules change (it invalidates cached aligned entries). v7 = raw-canonical
-// text: the final translation text is the pass-1 raw translation verbatim, and
-// the align pass only locates echoed fragments inside it (whole-word matches
-// only) — a sloppy echo can no longer strip punctuation or rewrite words.
-// (v6 = same without word-boundary matching; v5 = numbered-echo alignment,
-// text reconstructed from the echo; v4 = plain match-by-text.)
-const PromptVersion = "v7"
+// rules change (it invalidates cached aligned entries). v8 = explicit idiom /
+// phrasal-verb rule: every word of a fixed expression maps to the {TGT} word(s)
+// that render it ("piss off" → "отвали" claims both words), split particles
+// included. v7 = raw-canonical text: the final translation text is the pass-1
+// raw translation verbatim, and the align pass only locates echoed fragments
+// inside it (whole-word matches only) — a sloppy echo can no longer strip
+// punctuation or rewrite words. (v6 = same without word-boundary matching;
+// v5 = numbered-echo alignment, text reconstructed from the echo; v4 = plain
+// match-by-text.)
+const PromptVersion = "v8"
 
 // TrPromptVersion keys the TRANSLATE (pass 1) contract separately, so an
 // align-only contract change re-aligns the book without re-translating it.
