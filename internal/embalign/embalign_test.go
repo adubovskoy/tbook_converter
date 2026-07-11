@@ -85,6 +85,52 @@ done
 	}
 }
 
+// TestAlignerBatchProtocol drives AlignBatch against a stub that answers the
+// batch shape, including a per-item error (→ nil result for that item).
+func TestAlignerBatchProtocol(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "stub.py")
+	stub := `#!/bin/sh
+echo '{"ready": true}'
+while read -r line; do
+  echo '{"results": [{"pairs": [[0, 0]]}, {"error": "boom"}, {"pairs": []}]}'
+done
+`
+	if err := os.WriteFile(script, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Start(Options{Python: "/bin/sh", Script: script})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer a.Close()
+	srcs := [][]string{{"a"}, {"b"}, {"c"}}
+	tgts := [][]string{{"x"}, {"y"}, {"z"}}
+	res, err := a.AlignBatch(srcs, tgts)
+	if err != nil {
+		t.Fatalf("AlignBatch: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("results = %d", len(res))
+	}
+	if len(res[0]) != 1 || res[0][0] != [2]int{0, 0} {
+		t.Errorf("res[0] = %v", res[0])
+	}
+	if res[1] != nil {
+		t.Errorf("res[1] = %v, want nil (per-item error)", res[1])
+	}
+	if res[2] == nil || len(res[2]) != 0 {
+		t.Errorf("res[2] = %v, want empty non-nil", res[2])
+	}
+	// Mismatched result count is a request-level error.
+	if _, err := a.AlignBatch(srcs[:2], tgts[:2]); err == nil {
+		t.Error("AlignBatch accepted mismatched result count")
+	}
+}
+
 func TestAlignerBadHandshake(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("no /bin/sh")
