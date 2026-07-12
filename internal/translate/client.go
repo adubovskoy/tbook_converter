@@ -21,13 +21,18 @@ import (
 
 // LLM backends. OpenRouter is the metered HTTP API; Claude shells out to the
 // `claude` CLI in print mode, so batches run on the user's Claude subscription
-// (OAuth) with no per-token billing; Ollama posts to a local Ollama server's
-// OpenAI-compatible API (free, offline, no key).
+// (OAuth) with no per-token billing; Ollama and LlamaCpp post to a local
+// server's OpenAI-compatible API (free, offline, no key).
 const (
 	ProviderOpenRouter = "openrouter"
 	ProviderClaude     = "claude"
 	ProviderOllama     = "ollama"
+	ProviderLlamaCpp   = "llamacpp"
 )
+
+// localProvider reports whether p is a local OpenAI-compatible server, which
+// gets no OpenRouter request extensions.
+func localProvider(p string) bool { return p == ProviderOllama || p == ProviderLlamaCpp }
 
 // Options configures the LLM client.
 type Options struct {
@@ -171,7 +176,7 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 		}
 		// Provider routing and usage accounting are OpenRouter extensions;
 		// keep them out of requests to other OpenAI-compatible servers.
-		if c.opts.Provider != ProviderOllama {
+		if !localProvider(c.opts.Provider) {
 			if c.opts.ProviderSort != "" || len(c.opts.ProviderOrder) > 0 {
 				req.Provider = &providerPrefs{Sort: c.opts.ProviderSort, Order: c.opts.ProviderOrder}
 			}
@@ -546,20 +551,27 @@ func parseRetryAfter(h string) time.Duration {
 	return 0
 }
 
-// CheckOllama verifies before the run that the Ollama server is reachable at
-// baseURL and serves model, turning connection failures and a missing model
-// into actionable errors instead of a retried batch failure minutes in.
-func CheckOllama(baseURL, model string) error {
-	httpc := &http.Client{Timeout: 5 * time.Second}
+// ServedModels lists the model ids an OpenAI-compatible server reports at
+// GET {baseURL}/models (Ollama and llama-server both support it). apiKey may
+// be empty.
+func ServedModels(baseURL, apiKey string) ([]string, error) {
 	url := strings.TrimRight(baseURL, "/") + "/models"
-	resp, err := httpc.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return fmt.Errorf("can't reach the Ollama server at %s (%v) — is `ollama serve` running?", baseURL, err)
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpc := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpc.Do(req)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		return &apiError{status: resp.StatusCode, msg: clip(strings.TrimSpace(string(body)), 200), provider: ProviderOllama}
+		return nil, &apiError{status: resp.StatusCode, msg: clip(strings.TrimSpace(string(body)), 200), provider: "server"}
 	}
 	var list struct {
 		Data []struct {
@@ -567,18 +579,68 @@ func CheckOllama(baseURL, model string) error {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &list); err != nil {
-		return fmt.Errorf("unexpected reply from %s — not an OpenAI-style model list: %s", url, clip(string(body), 120))
+		return nil, fmt.Errorf("unexpected reply from %s — not an OpenAI-style model list: %s", url, clip(string(body), 120))
 	}
-	names := make([]string, 0, len(list.Data))
+	ids := make([]string, 0, len(list.Data))
 	for _, m := range list.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
+}
+
+// CheckOllama verifies before the run that the Ollama server is reachable at
+// baseURL and serves model, turning connection failures and a missing model
+// into actionable errors instead of a retried batch failure minutes in.
+func CheckOllama(baseURL, model string) error {
+	ids, err := ServedModels(baseURL, "")
+	if err != nil {
+		return fmt.Errorf("can't reach the Ollama server at %s (%v) — is `ollama serve` running?", baseURL, err)
+	}
+	for _, id := range ids {
 		// A bare model name resolves to the :latest tag on the server.
-		if m.ID == model || (!strings.Contains(model, ":") && m.ID == model+":latest") {
+		if id == model || (!strings.Contains(model, ":") && id == model+":latest") {
 			return nil
 		}
-		names = append(names, m.ID)
 	}
 	return fmt.Errorf("model %q not found on the Ollama server at %s (installed: %s) — run `ollama pull %s`",
-		model, baseURL, strings.Join(names, ", "), model)
+		model, baseURL, strings.Join(ids, ", "), model)
+}
+
+// AdoptServedModel returns a clean model id from what a llama.cpp server
+// reports serving — llama-server loads ONE model, ignores the requested id,
+// and lists it as a GGUF path or alias; the cleaned basename keys the cache
+// stably across machines.
+func AdoptServedModel(baseURL, apiKey string) (string, error) {
+	ids, err := ServedModels(baseURL, apiKey)
+	if err != nil {
+		return "", err
+	}
+	if len(ids) == 0 {
+		return "", errors.New("the server reports no loaded model")
+	}
+	name := ids[0]
+	if i := strings.LastIndexAny(name, "/\\"); i >= 0 {
+		name = name[i+1:]
+	}
+	return strings.TrimSuffix(name, ".gguf"), nil
+}
+
+// ServedBy reports whether model matches one of the served ids, exactly or by
+// AdoptServedModel's cleaned form (basename, no .gguf).
+func ServedBy(ids []string, model string) bool {
+	for _, id := range ids {
+		if id == model {
+			return true
+		}
+		name := id
+		if i := strings.LastIndexAny(name, "/\\"); i >= 0 {
+			name = name[i+1:]
+		}
+		if strings.TrimSuffix(name, ".gguf") == model {
+			return true
+		}
+	}
+	return false
 }
 
 // backoff returns the wait before the next attempt: Retry-After if the server

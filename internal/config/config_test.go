@@ -12,6 +12,7 @@ func clearProviderEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"PROVIDER", "MODEL", "CLAUDE_MODEL", "OLLAMA_MODEL", "OLLAMA_BASE_URL", "OLLAMA_API_KEY",
+		"LLAMACPP_MODEL", "LLAMACPP_BASE_URL", "LLAMACPP_API_KEY",
 		"OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "CONCURRENCY", "BATCH_SIZE", "REQUEST_TIMEOUT_SEC",
 		"JUDGE_MODEL", "ESCALATE_MODEL", "ALIGN_MODE",
 	} {
@@ -34,11 +35,11 @@ func TestOllamaDefaults(t *testing.T) {
 	if cfg.APIKey != "" {
 		t.Errorf("APIKey = %q, want empty (Ollama is keyless)", cfg.APIKey)
 	}
-	if cfg.Concurrency != defaultOllamaConcurrency {
-		t.Errorf("Concurrency = %d, want %d", cfg.Concurrency, defaultOllamaConcurrency)
+	if cfg.Concurrency != defaultLocalConcurrency {
+		t.Errorf("Concurrency = %d, want %d", cfg.Concurrency, defaultLocalConcurrency)
 	}
-	if cfg.BatchSize != defaultOllamaBatch {
-		t.Errorf("BatchSize = %d, want %d", cfg.BatchSize, defaultOllamaBatch)
+	if cfg.BatchSize != defaultLocalBatch {
+		t.Errorf("BatchSize = %d, want %d", cfg.BatchSize, defaultLocalBatch)
 	}
 	if cfg.Timeout != 300*time.Second {
 		t.Errorf("Timeout = %v, want 300s", cfg.Timeout)
@@ -92,6 +93,43 @@ func TestOllamaDropsOpenRouterModelLeftovers(t *testing.T) {
 	}
 	if cfg.EscalateModel != "hf.co/org/model:Q4" {
 		t.Errorf("EscalateModel = %q, want the hf.co id kept", cfg.EscalateModel)
+	}
+}
+
+func TestLlamaCppDefaults(t *testing.T) {
+	clearProviderEnv(t)
+	cfg, err := Load([]string{"book.epub", "--provider", "llama.cpp"}) // alias spelling
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider != ProviderLlamaCpp {
+		t.Errorf("alias not normalized: Provider = %q", cfg.Provider)
+	}
+	if cfg.Model != "" {
+		t.Errorf("Model = %q, want empty (adopted from the server at run time)", cfg.Model)
+	}
+	if cfg.BaseURL != "http://localhost:8080/v1" {
+		t.Errorf("BaseURL = %q", cfg.BaseURL)
+	}
+	if cfg.Concurrency != defaultLocalConcurrency || cfg.BatchSize != defaultLocalBatch {
+		t.Errorf("Concurrency/BatchSize = %d/%d, want %d/%d",
+			cfg.Concurrency, cfg.BatchSize, defaultLocalConcurrency, defaultLocalBatch)
+	}
+	if cfg.Timeout != 300*time.Second {
+		t.Errorf("Timeout = %v, want 300s", cfg.Timeout)
+	}
+
+	t.Setenv("LLAMACPP_MODEL", "gemma-3-4b-it-Q4_K_M")
+	t.Setenv("LLAMACPP_API_KEY", "sekrit")
+	cfg, err = Load([]string{"book.epub", "--provider", "llamacpp"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Model != "gemma-3-4b-it-Q4_K_M" {
+		t.Errorf("LLAMACPP_MODEL lost: %q", cfg.Model)
+	}
+	if cfg.APIKey != "sekrit" {
+		t.Errorf("LLAMACPP_API_KEY lost: %q", cfg.APIKey)
 	}
 }
 

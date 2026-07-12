@@ -67,39 +67,69 @@ func TestBackoffHonorsRetryAfter(t *testing.T) {
 	}
 }
 
-// The ollama provider must speak plain OpenAI chat-completions: no
+// The local providers must speak plain OpenAI chat-completions: no
 // Authorization header without a key, no OpenRouter routing/usage extensions.
-func TestOllamaRequestShape(t *testing.T) {
+func TestLocalProviderRequestShape(t *testing.T) {
+	for _, provider := range []string{ProviderOllama, ProviderLlamaCpp} {
+		t.Run(provider, func(t *testing.T) {
+			var gotAuth string
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				b, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(b, &gotBody)
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"1\":\"Привет\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+			}))
+			defer srv.Close()
+
+			c := NewClient(Options{Provider: provider, BaseURL: srv.URL,
+				Model: "test-model", JSONMode: true, ProviderSort: "throughput"})
+			out, err := c.TranslateText(context.Background(), "sys", `[{"id":"1","src":"Hi"}]`)
+			if err != nil {
+				t.Fatalf("TranslateText: %v", err)
+			}
+			if out["1"] != "Привет" {
+				t.Errorf("out = %v", out)
+			}
+			if gotAuth != "" {
+				t.Errorf("Authorization sent without a key: %q", gotAuth)
+			}
+			for _, k := range []string{"provider", "usage"} {
+				if _, ok := gotBody[k]; ok {
+					t.Errorf("OpenRouter-only field %q sent to %s", k, provider)
+				}
+			}
+			if rf, ok := gotBody["response_format"].(map[string]any); !ok || rf["type"] != "json_object" {
+				t.Errorf("response_format missing/wrong: %v", gotBody["response_format"])
+			}
+		})
+	}
+}
+
+func TestAdoptServedModel(t *testing.T) {
 	var gotAuth string
-	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &gotBody)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"1\":\"Привет\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+		fmt.Fprint(w, `{"object":"list","data":[{"id":"/home/u/.cache/llama.cpp/gemma-3-4b-it-Q4_K_M.gguf"}]}`)
 	}))
 	defer srv.Close()
 
-	c := NewClient(Options{Provider: ProviderOllama, BaseURL: srv.URL,
-		Model: "translategemma:12b", JSONMode: true, ProviderSort: "throughput"})
-	out, err := c.TranslateText(context.Background(), "sys", `[{"id":"1","src":"Hi"}]`)
+	m, err := AdoptServedModel(srv.URL, "sekrit")
 	if err != nil {
-		t.Fatalf("TranslateText: %v", err)
+		t.Fatalf("AdoptServedModel: %v", err)
 	}
-	if out["1"] != "Привет" {
-		t.Errorf("out = %v", out)
+	if m != "gemma-3-4b-it-Q4_K_M" {
+		t.Errorf("adopted %q, want cleaned basename", m)
 	}
-	if gotAuth != "" {
-		t.Errorf("Authorization sent without a key: %q", gotAuth)
+	if gotAuth != "Bearer sekrit" {
+		t.Errorf("Authorization = %q", gotAuth)
 	}
-	for _, k := range []string{"provider", "usage"} {
-		if _, ok := gotBody[k]; ok {
-			t.Errorf("OpenRouter-only field %q sent to ollama", k)
-		}
+	if !ServedBy([]string{"/home/u/.cache/llama.cpp/gemma-3-4b-it-Q4_K_M.gguf"}, "gemma-3-4b-it-Q4_K_M") {
+		t.Errorf("ServedBy should match the cleaned form")
 	}
-	if rf, ok := gotBody["response_format"].(map[string]any); !ok || rf["type"] != "json_object" {
-		t.Errorf("response_format missing/wrong: %v", gotBody["response_format"])
+	if ServedBy([]string{"other.gguf"}, "gemma-3-4b-it-Q4_K_M") {
+		t.Errorf("ServedBy matched a different model")
 	}
 }
 
