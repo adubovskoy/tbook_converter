@@ -22,8 +22,11 @@ type Config struct {
 	// Provider selects the LLM backend: "openrouter" (metered HTTP API,
 	// needs OPENROUTER_API_KEY), "claude" (the `claude` CLI in print mode —
 	// runs on the user's Claude subscription, no API key, no per-token cost),
-	// or "ollama" (a local model served by Ollama's OpenAI-compatible API —
-	// free and offline, no key; needs `ollama serve` + a pulled model).
+	// "ollama" (a local model served by Ollama's OpenAI-compatible API —
+	// free and offline, no key; needs `ollama serve` + a pulled model), or
+	// "llamacpp" (a local llama.cpp `llama-server`, also OpenAI-compatible;
+	// serves ONE model and ignores the requested id — with no LLAMACPP_MODEL
+	// set, the served model's name is adopted for cache keys and logs).
 	Provider  string
 	ClaudeBin string // claude CLI path; "" = "claude" from $PATH
 
@@ -104,8 +107,8 @@ func Load(args []string) (*Config, error) {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: convert <book.epub|book.fb2|book.tbook> -o <book.tbook> [flags]\n\n"+
 			"Translate an EPUB or FB2 into a .tbook archive — via OpenRouter (metered), the\n"+
-			"claude CLI on your Claude subscription (--provider claude), or a local Ollama\n"+
-			"model (--provider ollama) — or add a target\n"+
+			"claude CLI on your Claude subscription (--provider claude), or a local model\n"+
+			"(--provider ollama or llamacpp) — or add a target\n"+
 			"language to an existing .tbook (given as input; existing translations kept).\n"+
 			"Configuration is read from .env (see .env.example), overridable by these flags.\n\nFlags:\n")
 		fs.PrintDefaults()
@@ -124,9 +127,9 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&source, "source", envOr("SOURCE_LANG", "en"), "source language code")
 	fs.StringVar(&sourceShort, "s", "", "shorthand for --source")
 	provider := fs.String("provider", envOr("PROVIDER", "openrouter"),
-		"LLM backend: openrouter (metered API) | claude (claude CLI on your Claude subscription; no API key) | ollama (local Ollama server; no key)")
+		"LLM backend: openrouter (metered API) | claude (claude CLI on your Claude subscription; no API key) | ollama, llamacpp (local server; no key)")
 	model := fs.String("model", "",
-		"model id (default: MODEL env or "+defaultOpenRouterModel+" for openrouter; CLAUDE_MODEL env or "+defaultClaudeModel+" for claude; OLLAMA_MODEL env or "+defaultOllamaModel+" for ollama)")
+		"model id (default: MODEL env or "+defaultOpenRouterModel+" for openrouter; CLAUDE_MODEL env or "+defaultClaudeModel+" for claude; OLLAMA_MODEL env or "+defaultOllamaModel+" for ollama; LLAMACPP_MODEL env or the served model for llamacpp)")
 	cacheDir := fs.String("cache-dir", envOr("CACHE_DIR", ".tbook_cache"), "translation cache directory")
 	batchSize := fs.Int("batch-size", envInt("BATCH_SIZE", 16), "sentences per API request")
 	alignBatch := fs.Int("align-batch", envInt("ALIGN_BATCH", 0), "sentences per ALIGN request (0 = batch-size/4; small align batches curb positional drift)")
@@ -241,15 +244,24 @@ func Load(args []string) (*Config, error) {
 		EmbQMin:         *embQ,
 		Invalidate:      *invalidate,
 	}
-	if cfg.Provider != ProviderOpenRouter && cfg.Provider != ProviderClaude && cfg.Provider != ProviderOllama {
-		return nil, fmt.Errorf("unknown --provider %q (want openrouter, claude or ollama)", cfg.Provider)
+	if cfg.Provider == "llama.cpp" { // accept the project's own spelling
+		cfg.Provider = ProviderLlamaCpp
 	}
-	// Ollama serves an OpenAI-compatible API locally and needs no key
-	// (OLLAMA_API_KEY exists for a reverse proxy that demands one). The
-	// OPENROUTER_* endpoint/key from .env must not leak into it.
-	if cfg.Provider == ProviderOllama {
+	switch cfg.Provider {
+	case ProviderOpenRouter, ProviderClaude, ProviderOllama, ProviderLlamaCpp:
+	default:
+		return nil, fmt.Errorf("unknown --provider %q (want openrouter, claude, ollama or llamacpp)", cfg.Provider)
+	}
+	// Ollama and llama-server speak the OpenAI API locally and need no key
+	// (the *_API_KEY vars exist for llama-server's --api-key or a reverse
+	// proxy). The OPENROUTER_* endpoint/key from .env must not leak into them.
+	switch cfg.Provider {
+	case ProviderOllama:
 		cfg.BaseURL = strings.TrimRight(envOr("OLLAMA_BASE_URL", "http://localhost:11434/v1"), "/")
 		cfg.APIKey = os.Getenv("OLLAMA_API_KEY")
+	case ProviderLlamaCpp:
+		cfg.BaseURL = strings.TrimRight(envOr("LLAMACPP_BASE_URL", "http://localhost:8080/v1"), "/")
+		cfg.APIKey = os.Getenv("LLAMACPP_API_KEY")
 	}
 	if cfg.AlignMode != AlignLLM && cfg.AlignMode != AlignEmb && cfg.AlignMode != AlignHybrid {
 		return nil, fmt.Errorf("unknown --align-mode %q (want llm, emb or hybrid)", cfg.AlignMode)
@@ -281,27 +293,34 @@ func Load(args []string) (*Config, error) {
 			cfg.Model = envOr("CLAUDE_MODEL", defaultClaudeModel)
 		case ProviderOllama:
 			cfg.Model = envOr("OLLAMA_MODEL", defaultOllamaModel)
+		case ProviderLlamaCpp:
+			// Empty means "adopt whatever the server serves" — llama-server
+			// loads one model and ignores the requested id anyway; the run
+			// resolves the real name at startup for cache keys and logs.
+			cfg.Model = os.Getenv("LLAMACPP_MODEL")
 		default:
 			cfg.Model = envOr("MODEL", defaultOpenRouterModel)
 		}
 	}
+	local := cfg.Provider == ProviderOllama || cfg.Provider == ProviderLlamaCpp
 	// A claude CLI call carries process-startup overhead on top of generation,
-	// and local Ollama inference is slow outright; give both a roomier default
+	// and local inference is slow outright; give both a roomier default
 	// timeout (explicit REQUEST_TIMEOUT_SEC still wins).
-	if (cfg.Provider == ProviderClaude || cfg.Provider == ProviderOllama) && os.Getenv("REQUEST_TIMEOUT_SEC") == "" {
+	if (cfg.Provider == ProviderClaude || local) && os.Getenv("REQUEST_TIMEOUT_SEC") == "" {
 		cfg.Timeout = 300 * time.Second
 	}
-	// An Ollama server runs OLLAMA_NUM_PARALLEL requests (often 1) and queues
-	// the rest, which then share the per-request timeout budget — the default
-	// 32 would time batches out in the queue. And local translation fine-tunes
-	// (translategemma) silently translate only the first few items of a large
-	// batch: measured 16 → 1 answer, 8 → all 8; 4 keeps a margin, and costs
-	// little since local generation is output-bound. Explicit flag/env wins.
-	if cfg.Provider == ProviderOllama && !concurrencySet {
-		cfg.Concurrency = defaultOllamaConcurrency
+	// A local server runs a few requests at once (OLLAMA_NUM_PARALLEL,
+	// llama-server -np; often 1-2) and queues the rest, which then share the
+	// per-request timeout budget — the default 32 would time batches out in
+	// the queue. And small local models silently translate only the first few
+	// items of a large batch: measured on translategemma, 16 → 1 answer,
+	// 8 → all 8; 4 keeps a margin, and costs little since local generation is
+	// output-bound. Explicit flag/env wins.
+	if local && !concurrencySet {
+		cfg.Concurrency = defaultLocalConcurrency
 	}
-	if cfg.Provider == ProviderOllama && !batchSet {
-		cfg.BatchSize = defaultOllamaBatch
+	if local && !batchSet {
+		cfg.BatchSize = defaultLocalBatch
 	}
 	// OpenRouter ids carry a vendor prefix ("google/…"); Claude model ids never
 	// do. Under the claude provider, drop such leftovers from .env rather than
@@ -314,10 +333,12 @@ func Load(args []string) (*Config, error) {
 			cfg.EscalateModel = ""
 		}
 	}
-	// Same hygiene for Ollama, whose ids are "name[:tag]" — a "/" appears only
-	// in registry pulls ("hf.co/org/model:Q4"), which always carry a ":tag".
-	// An id with "/" but no ":" is an OpenRouter leftover from .env.
-	if cfg.Provider == ProviderOllama {
+	// Same hygiene for the local servers: Ollama ids are "name[:tag]" — a "/"
+	// appears only in registry pulls ("hf.co/org/model:Q4"), which always
+	// carry a ":tag" — and llama-server ignores the requested id entirely, so
+	// any judge/escalate override is the served model regardless. An id with
+	// "/" but no ":" is an OpenRouter leftover from .env.
+	if local {
 		if strings.Contains(cfg.JudgeModel, "/") && !strings.Contains(cfg.JudgeModel, ":") {
 			cfg.JudgeModel = ""
 		}
@@ -365,6 +386,7 @@ const (
 	ProviderOpenRouter = "openrouter"
 	ProviderClaude     = "claude"
 	ProviderOllama     = "ollama"
+	ProviderLlamaCpp   = "llamacpp"
 )
 
 // Alignment-pass modes (mirrored in internal/translate).
@@ -387,13 +409,13 @@ const (
 	defaultOllamaModel     = "translategemma:12b" // Gemma 3 translation fine-tune (ollama.com/library/translategemma)
 )
 
-// defaultOllamaConcurrency and defaultOllamaBatch replace the global defaults
-// when no flag/env sets them — a local server serializes past
-// OLLAMA_NUM_PARALLEL, and local translation fine-tunes drop most of a large
-// batch (see Load).
+// defaultLocalConcurrency and defaultLocalBatch replace the global defaults
+// for the local backends (ollama, llamacpp) when no flag/env sets them — a
+// local server serializes past its parallel-slot count, and small local
+// models drop most of a large batch (see Load).
 const (
-	defaultOllamaConcurrency = 2
-	defaultOllamaBatch       = 4
+	defaultLocalConcurrency = 2
+	defaultLocalBatch       = 4
 )
 
 // trimBookExt strips a known book extension (case-insensitive) so the default

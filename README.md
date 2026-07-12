@@ -51,14 +51,25 @@ runs every batch on your logged-in `claude` CLI subscription (default model
 `claude-haiku-4-5`; `MODEL` in `.env` is OpenRouter-only and never leaks into
 the claude backend).
 
-Fully local and free: `./convert book.epub --provider ollama` sends batches to
-an [Ollama](https://ollama.com) server (default `http://localhost:11434/v1`,
-override with `OLLAMA_BASE_URL`). Default model `translategemma:12b` — pull it
-first (`ollama pull translategemma:12b`) or set `OLLAMA_MODEL`. Defaults adapt
-(unless set by flag/env): batch size 4 (translation fine-tunes silently answer
-only the first few items of a 16-sentence batch), concurrency 2 (the server
-queues requests past `OLLAMA_NUM_PARALLEL`), request timeout 300 s. Expect it
-to be far slower than an API model unless the model fits your GPU.
+Fully local and free — two backends:
+
+- `--provider ollama` sends batches to an [Ollama](https://ollama.com) server
+  (default `http://localhost:11434/v1`, override with `OLLAMA_BASE_URL`).
+  Default model `translategemma:12b` — pull it first
+  (`ollama pull translategemma:12b`) or set `OLLAMA_MODEL`.
+- `--provider llamacpp` sends them to a
+  [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`
+  (default `http://localhost:8080/v1`, override with `LLAMACPP_BASE_URL`), e.g.
+  `llama-server -hf ggml-org/gemma-3-4b-it-GGUF -np 2 -c 8192 --jinja`.
+  llama-server serves one model and ignores the requested id, so the served
+  model's name is adopted automatically (set `LLAMACPP_MODEL` to pin cache
+  keys); `LLAMACPP_API_KEY` matches a server started with `--api-key`.
+
+For both, defaults adapt (unless set by flag/env): batch size 4 (small local
+models silently answer only the first few items of a 16-sentence batch),
+concurrency 2 (the server queues requests past its parallel slots), request
+timeout 300 s. Expect a local run to be far slower than an API model unless
+the model fits your GPU.
 
 Settings precedence: **flags > shell env > `.env` > defaults**.
 `./convert --help` lists everything.
@@ -66,7 +77,7 @@ Settings precedence: **flags > shell env > `.env` > defaults**.
 ## Flags
 
 Core: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
-`--provider` (`openrouter`|`claude`|`ollama`), `--model`, `--cache-dir` (default
+`--provider` (`openrouter`|`claude`|`ollama`|`llamacpp`), `--model`, `--cache-dir` (default
 `.tbook_cache`), `--limit-chapters N`, `--dry-run`, `--force` (ignore cache),
 `--stats file.jsonl` (per-request latency/provider/tokens/cost log), `-v`.
 

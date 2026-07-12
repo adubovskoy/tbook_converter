@@ -72,6 +72,9 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("read --invalidate file: %w", err)
 		}
+		if err := ensureLlamaCppModel(cfg); err != nil {
+			return err
+		}
 		n := cache.Invalidate(cfg.CacheDir, srcs, cfg.Targets, cfg.Source, cfg.Model)
 		fmt.Printf("Invalidated %d cache file(s) for %d source sentence(s) — re-run to redo them.\n",
 			n, len(srcs))
@@ -171,6 +174,11 @@ func run() error {
 		return nil
 	}
 
+	// Must precede any cache math: cache keys embed the model id.
+	if err := ensureLlamaCppModel(cfg); err != nil {
+		return err
+	}
+
 	cacheModel := cfg.Model
 	var glossary []translate.GlossEntry
 
@@ -206,6 +214,18 @@ func run() error {
 					return err
 				}
 			}
+		case config.ProviderLlamaCpp:
+			served, err := translate.ServedModels(cfg.BaseURL, cfg.APIKey)
+			if err != nil {
+				return fmt.Errorf("can't reach the llama.cpp server at %s (%v) — is llama-server running?",
+					cfg.BaseURL, err)
+			}
+			// llama-server ignores the requested id, so a mismatch cannot fail
+			// a call — it would only mislabel the cache; say so and continue.
+			if !translate.ServedBy(served, cfg.Model) {
+				fmt.Printf("note: the llama.cpp server serves %s, not %q — requests use the served model; cache keys keep %q\n",
+					strings.Join(served, ", "), cfg.Model, cfg.Model)
+			}
 		default:
 			if cfg.APIKey == "" && countPending() > 0 {
 				return fmt.Errorf("%d sentences need translating but OPENROUTER_API_KEY is not set "+
@@ -239,6 +259,8 @@ func run() error {
 			via = "claude CLI (subscription) / " + cfg.Model
 		case config.ProviderOllama:
 			via = cfg.Model + " (ollama at " + cfg.BaseURL + ")"
+		case config.ProviderLlamaCpp:
+			via = cfg.Model + " (llama.cpp at " + cfg.BaseURL + ")"
 		}
 		fmt.Printf("Translating %s→%s via %s ...\n", cfg.Source, strings.Join(cfg.Targets, ","), via)
 		pipe := &translate.Pipeline{
@@ -499,6 +521,26 @@ func localCoverage(tr tbook.Translation) float64 {
 		return 0
 	}
 	return float64(aligned) / float64(words)
+}
+
+// ensureLlamaCppModel resolves an empty --model/LLAMACPP_MODEL against the
+// llama.cpp server before any cache math: llama-server serves ONE model and
+// ignores the requested id, but cache keys and logs need the real name.
+func ensureLlamaCppModel(cfg *config.Config) error {
+	if cfg.Provider != config.ProviderLlamaCpp || cfg.Model != "" {
+		return nil
+	}
+	m, err := translate.AdoptServedModel(cfg.BaseURL, cfg.APIKey)
+	if err != nil {
+		return fmt.Errorf("resolving the llama.cpp model at %s: %w — start "+
+			"`llama-server -hf <model>`, or set LLAMACPP_BASE_URL/LLAMACPP_MODEL", cfg.BaseURL, err)
+	}
+	cfg.Model = m
+	if cfg.JudgeModel == "" { // the config-time default ran while Model was empty
+		cfg.JudgeModel = m
+	}
+	fmt.Printf("llama.cpp serves %q — adopted as the model id (set LLAMACPP_MODEL to pin cache keys)\n", m)
+	return nil
 }
 
 // clientOptions builds the LLM client options shared by every pass
