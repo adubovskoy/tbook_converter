@@ -193,11 +193,24 @@ func run() error {
 				return fmt.Errorf("--provider claude needs the Claude Code CLI (%q not found in PATH); "+
 					"install it or set CLAUDE_BIN", cfg.ClaudeBin)
 			}
+		case config.ProviderOllama:
+			models := []string{cfg.Model}
+			if cfg.Judge && cfg.JudgeModel != cfg.Model {
+				models = append(models, cfg.JudgeModel)
+			}
+			if cfg.EscalateModel != "" && cfg.EscalateModel != cfg.Model {
+				models = append(models, cfg.EscalateModel)
+			}
+			for _, m := range models {
+				if err := translate.CheckOllama(cfg.BaseURL, m); err != nil {
+					return err
+				}
+			}
 		default:
 			if cfg.APIKey == "" && countPending() > 0 {
 				return fmt.Errorf("%d sentences need translating but OPENROUTER_API_KEY is not set "+
-					"(put it in converter/.env — see .env.example — or use --provider claude "+
-					"to run on your Claude subscription)", countPending())
+					"(put it in converter/.env — see .env.example — use --provider claude "+
+					"to run on your Claude subscription, or --provider ollama for a local model)", countPending())
 			}
 		}
 		client = translate.NewClient(clientOptions(cfg, cfg.Model, cfg.Temperature))
@@ -221,8 +234,11 @@ func run() error {
 
 	if pending := countPending(); pending > 0 {
 		via := cfg.Model
-		if cfg.Provider == config.ProviderClaude {
+		switch cfg.Provider {
+		case config.ProviderClaude:
 			via = "claude CLI (subscription) / " + cfg.Model
+		case config.ProviderOllama:
+			via = cfg.Model + " (ollama at " + cfg.BaseURL + ")"
 		}
 		fmt.Printf("Translating %s→%s via %s ...\n", cfg.Source, strings.Join(cfg.Targets, ","), via)
 		pipe := &translate.Pipeline{
