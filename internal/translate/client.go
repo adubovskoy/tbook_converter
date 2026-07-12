@@ -21,10 +21,12 @@ import (
 
 // LLM backends. OpenRouter is the metered HTTP API; Claude shells out to the
 // `claude` CLI in print mode, so batches run on the user's Claude subscription
-// (OAuth) with no per-token billing.
+// (OAuth) with no per-token billing; Ollama posts to a local Ollama server's
+// OpenAI-compatible API (free, offline, no key).
 const (
 	ProviderOpenRouter = "openrouter"
 	ProviderClaude     = "claude"
+	ProviderOllama     = "ollama"
 )
 
 // Options configures the LLM client.
@@ -56,7 +58,8 @@ type Options struct {
 	Stats *Stats
 }
 
-// Client calls the OpenRouter chat-completions API with retry/backoff.
+// Client calls an OpenAI-style chat-completions API (OpenRouter, or a local
+// Ollama server) with retry/backoff.
 type Client struct {
 	opts Options
 	http *http.Client
@@ -122,17 +125,27 @@ type chatResponse struct {
 
 // apiError is a non-2xx response. Permanent statuses are not retried.
 type apiError struct {
-	status int
-	msg    string
+	status   int
+	msg      string
+	provider string // backend label for the error message
 }
 
-func (e *apiError) Error() string { return fmt.Sprintf("openrouter %d: %s", e.status, e.msg) }
+func (e *apiError) Error() string { return fmt.Sprintf("%s %d: %s", e.provider, e.status, e.msg) }
 func (e *apiError) permanent() bool {
 	switch e.status {
-	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired,
+		http.StatusForbidden, http.StatusNotFound: // 404: model not pulled / bad endpoint
 		return true
 	}
 	return false
+}
+
+// providerLabel names the HTTP backend in errors and stats.
+func (c *Client) providerLabel() string {
+	if c.opts.Provider == "" {
+		return ProviderOpenRouter
+	}
+	return c.opts.Provider
 }
 
 // chat sends one batch (system instructions + user JSON) and invokes parse on
@@ -156,11 +169,15 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 		if c.opts.JSONMode {
 			req.ResponseFormat = &responseFormat{Type: "json_object"}
 		}
-		if c.opts.ProviderSort != "" || len(c.opts.ProviderOrder) > 0 {
-			req.Provider = &providerPrefs{Sort: c.opts.ProviderSort, Order: c.opts.ProviderOrder}
-		}
-		if c.opts.Stats != nil {
-			req.Usage = &usageOpt{Include: true}
+		// Provider routing and usage accounting are OpenRouter extensions;
+		// keep them out of requests to other OpenAI-compatible servers.
+		if c.opts.Provider != ProviderOllama {
+			if c.opts.ProviderSort != "" || len(c.opts.ProviderOrder) > 0 {
+				req.Provider = &providerPrefs{Sort: c.opts.ProviderSort, Order: c.opts.ProviderOrder}
+			}
+			if c.opts.Stats != nil {
+				req.Usage = &usageOpt{Include: true}
+			}
 		}
 		payload, err := json.Marshal(req)
 		if err != nil {
@@ -405,7 +422,9 @@ func (c *Client) once(ctx context.Context, payload []byte, rec *statRec) (string
 	if err != nil {
 		return "", 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.opts.APIKey)
+	if c.opts.APIKey != "" { // Ollama runs keyless; don't send an empty Bearer
+		req.Header.Set("Authorization", "Bearer "+c.opts.APIKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.opts.Referer != "" {
 		req.Header.Set("HTTP-Referer", c.opts.Referer)
@@ -433,7 +452,7 @@ func (c *Client) once(ctx context.Context, payload []byte, rec *statRec) (string
 		if len(msg) > 300 {
 			msg = msg[:300]
 		}
-		return "", ra, &apiError{status: resp.StatusCode, msg: msg}
+		return "", ra, &apiError{status: resp.StatusCode, msg: msg, provider: c.providerLabel()}
 	}
 
 	var cr chatResponse
@@ -441,6 +460,9 @@ func (c *Client) once(ctx context.Context, payload []byte, rec *statRec) (string
 		return "", 0, err
 	}
 	rec.Provider = cr.Provider
+	if rec.Provider == "" { // only OpenRouter reports a serving provider
+		rec.Provider = c.providerLabel()
+	}
 	if cr.Usage != nil {
 		rec.PromptTok = cr.Usage.PromptTokens
 		rec.OutputTok = cr.Usage.CompletionTokens
@@ -522,6 +544,41 @@ func parseRetryAfter(h string) time.Duration {
 		return time.Duration(secs) * time.Second
 	}
 	return 0
+}
+
+// CheckOllama verifies before the run that the Ollama server is reachable at
+// baseURL and serves model, turning connection failures and a missing model
+// into actionable errors instead of a retried batch failure minutes in.
+func CheckOllama(baseURL, model string) error {
+	httpc := &http.Client{Timeout: 5 * time.Second}
+	url := strings.TrimRight(baseURL, "/") + "/models"
+	resp, err := httpc.Get(url)
+	if err != nil {
+		return fmt.Errorf("can't reach the Ollama server at %s (%v) — is `ollama serve` running?", baseURL, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		return &apiError{status: resp.StatusCode, msg: clip(strings.TrimSpace(string(body)), 200), provider: ProviderOllama}
+	}
+	var list struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		return fmt.Errorf("unexpected reply from %s — not an OpenAI-style model list: %s", url, clip(string(body), 120))
+	}
+	names := make([]string, 0, len(list.Data))
+	for _, m := range list.Data {
+		// A bare model name resolves to the :latest tag on the server.
+		if m.ID == model || (!strings.Contains(model, ":") && m.ID == model+":latest") {
+			return nil
+		}
+		names = append(names, m.ID)
+	}
+	return fmt.Errorf("model %q not found on the Ollama server at %s (installed: %s) — run `ollama pull %s`",
+		model, baseURL, strings.Join(names, ", "), model)
 }
 
 // backoff returns the wait before the next attempt: Retry-After if the server

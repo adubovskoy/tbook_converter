@@ -51,13 +51,22 @@ runs every batch on your logged-in `claude` CLI subscription (default model
 `claude-haiku-4-5`; `MODEL` in `.env` is OpenRouter-only and never leaks into
 the claude backend).
 
+Fully local and free: `./convert book.epub --provider ollama` sends batches to
+an [Ollama](https://ollama.com) server (default `http://localhost:11434/v1`,
+override with `OLLAMA_BASE_URL`). Default model `translategemma:12b` — pull it
+first (`ollama pull translategemma:12b`) or set `OLLAMA_MODEL`. Defaults adapt
+(unless set by flag/env): batch size 4 (translation fine-tunes silently answer
+only the first few items of a 16-sentence batch), concurrency 2 (the server
+queues requests past `OLLAMA_NUM_PARALLEL`), request timeout 300 s. Expect it
+to be far slower than an API model unless the model fits your GPU.
+
 Settings precedence: **flags > shell env > `.env` > defaults**.
 `./convert --help` lists everything.
 
 ## Flags
 
 Core: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
-`--provider` (`openrouter`|`claude`), `--model`, `--cache-dir` (default
+`--provider` (`openrouter`|`claude`|`ollama`), `--model`, `--cache-dir` (default
 `.tbook_cache`), `--limit-chapters N`, `--dry-run`, `--force` (ignore cache),
 `--stats file.jsonl` (per-request latency/provider/tokens/cost log), `-v`.
 

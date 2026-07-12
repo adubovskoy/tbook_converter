@@ -20,8 +20,10 @@ type Config struct {
 	Out   string
 
 	// Provider selects the LLM backend: "openrouter" (metered HTTP API,
-	// needs OPENROUTER_API_KEY) or "claude" (the `claude` CLI in print mode —
-	// runs on the user's Claude subscription, no API key, no per-token cost).
+	// needs OPENROUTER_API_KEY), "claude" (the `claude` CLI in print mode —
+	// runs on the user's Claude subscription, no API key, no per-token cost),
+	// or "ollama" (a local model served by Ollama's OpenAI-compatible API —
+	// free and offline, no key; needs `ollama serve` + a pulled model).
 	Provider  string
 	ClaudeBin string // claude CLI path; "" = "claude" from $PATH
 
@@ -101,8 +103,9 @@ func Load(args []string) (*Config, error) {
 	fs := flag.NewFlagSet("convert", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: convert <book.epub|book.fb2|book.tbook> -o <book.tbook> [flags]\n\n"+
-			"Translate an EPUB or FB2 into a .tbook archive — via OpenRouter (metered) or\n"+
-			"the claude CLI on your Claude subscription (--provider claude) — or add a target\n"+
+			"Translate an EPUB or FB2 into a .tbook archive — via OpenRouter (metered), the\n"+
+			"claude CLI on your Claude subscription (--provider claude), or a local Ollama\n"+
+			"model (--provider ollama) — or add a target\n"+
 			"language to an existing .tbook (given as input; existing translations kept).\n"+
 			"Configuration is read from .env (see .env.example), overridable by these flags.\n\nFlags:\n")
 		fs.PrintDefaults()
@@ -121,9 +124,9 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&source, "source", envOr("SOURCE_LANG", "en"), "source language code")
 	fs.StringVar(&sourceShort, "s", "", "shorthand for --source")
 	provider := fs.String("provider", envOr("PROVIDER", "openrouter"),
-		"LLM backend: openrouter (metered API) | claude (claude CLI on your Claude subscription; no API key)")
+		"LLM backend: openrouter (metered API) | claude (claude CLI on your Claude subscription; no API key) | ollama (local Ollama server; no key)")
 	model := fs.String("model", "",
-		"model id (default: MODEL env or "+defaultOpenRouterModel+" for openrouter; CLAUDE_MODEL env or "+defaultClaudeModel+" for claude)")
+		"model id (default: MODEL env or "+defaultOpenRouterModel+" for openrouter; CLAUDE_MODEL env or "+defaultClaudeModel+" for claude; OLLAMA_MODEL env or "+defaultOllamaModel+" for ollama)")
 	cacheDir := fs.String("cache-dir", envOr("CACHE_DIR", ".tbook_cache"), "translation cache directory")
 	batchSize := fs.Int("batch-size", envInt("BATCH_SIZE", 16), "sentences per API request")
 	alignBatch := fs.Int("align-batch", envInt("ALIGN_BATCH", 0), "sentences per ALIGN request (0 = batch-size/4; small align batches curb positional drift)")
@@ -238,8 +241,15 @@ func Load(args []string) (*Config, error) {
 		EmbQMin:         *embQ,
 		Invalidate:      *invalidate,
 	}
-	if cfg.Provider != ProviderOpenRouter && cfg.Provider != ProviderClaude {
-		return nil, fmt.Errorf("unknown --provider %q (want openrouter or claude)", cfg.Provider)
+	if cfg.Provider != ProviderOpenRouter && cfg.Provider != ProviderClaude && cfg.Provider != ProviderOllama {
+		return nil, fmt.Errorf("unknown --provider %q (want openrouter, claude or ollama)", cfg.Provider)
+	}
+	// Ollama serves an OpenAI-compatible API locally and needs no key
+	// (OLLAMA_API_KEY exists for a reverse proxy that demands one). The
+	// OPENROUTER_* endpoint/key from .env must not leak into it.
+	if cfg.Provider == ProviderOllama {
+		cfg.BaseURL = strings.TrimRight(envOr("OLLAMA_BASE_URL", "http://localhost:11434/v1"), "/")
+		cfg.APIKey = os.Getenv("OLLAMA_API_KEY")
 	}
 	if cfg.AlignMode != AlignLLM && cfg.AlignMode != AlignEmb && cfg.AlignMode != AlignHybrid {
 		return nil, fmt.Errorf("unknown --align-mode %q (want llm, emb or hybrid)", cfg.AlignMode)
@@ -247,9 +257,16 @@ func Load(args []string) (*Config, error) {
 	// Explicit align-mode choice (flag or env) fails hard when the local
 	// aligner is missing; the built-in hybrid default degrades to llm instead.
 	cfg.AlignModeExplicit = os.Getenv("ALIGN_MODE") != ""
+	concurrencySet := os.Getenv("CONCURRENCY") != ""
+	batchSet := os.Getenv("BATCH_SIZE") != ""
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "align-mode" {
+		switch f.Name {
+		case "align-mode":
 			cfg.AlignModeExplicit = true
+		case "concurrency":
+			concurrencySet = true
+		case "batch-size":
+			batchSet = true
 		}
 	})
 	if cfg.JudgeScope != JudgeScopeAll && cfg.JudgeScope != JudgeScopeFlagged {
@@ -257,18 +274,34 @@ func Load(args []string) (*Config, error) {
 	}
 	// The model default follows the provider, each with its own env var — the
 	// MODEL in .env is an OpenRouter id and must never leak into the claude
-	// CLI (which would fail every call on an unknown model).
+	// CLI or an Ollama server (which would fail every call on an unknown model).
 	if cfg.Model == "" {
-		if cfg.Provider == ProviderClaude {
+		switch cfg.Provider {
+		case ProviderClaude:
 			cfg.Model = envOr("CLAUDE_MODEL", defaultClaudeModel)
-		} else {
+		case ProviderOllama:
+			cfg.Model = envOr("OLLAMA_MODEL", defaultOllamaModel)
+		default:
 			cfg.Model = envOr("MODEL", defaultOpenRouterModel)
 		}
 	}
-	// A claude CLI call carries process-startup overhead on top of generation;
-	// give it a roomier default timeout (explicit REQUEST_TIMEOUT_SEC still wins).
-	if cfg.Provider == ProviderClaude && os.Getenv("REQUEST_TIMEOUT_SEC") == "" {
+	// A claude CLI call carries process-startup overhead on top of generation,
+	// and local Ollama inference is slow outright; give both a roomier default
+	// timeout (explicit REQUEST_TIMEOUT_SEC still wins).
+	if (cfg.Provider == ProviderClaude || cfg.Provider == ProviderOllama) && os.Getenv("REQUEST_TIMEOUT_SEC") == "" {
 		cfg.Timeout = 300 * time.Second
+	}
+	// An Ollama server runs OLLAMA_NUM_PARALLEL requests (often 1) and queues
+	// the rest, which then share the per-request timeout budget — the default
+	// 32 would time batches out in the queue. And local translation fine-tunes
+	// (translategemma) silently translate only the first few items of a large
+	// batch: measured 16 → 1 answer, 8 → all 8; 4 keeps a margin, and costs
+	// little since local generation is output-bound. Explicit flag/env wins.
+	if cfg.Provider == ProviderOllama && !concurrencySet {
+		cfg.Concurrency = defaultOllamaConcurrency
+	}
+	if cfg.Provider == ProviderOllama && !batchSet {
+		cfg.BatchSize = defaultOllamaBatch
 	}
 	// OpenRouter ids carry a vendor prefix ("google/…"); Claude model ids never
 	// do. Under the claude provider, drop such leftovers from .env rather than
@@ -278,6 +311,17 @@ func Load(args []string) (*Config, error) {
 			cfg.JudgeModel = ""
 		}
 		if strings.Contains(cfg.EscalateModel, "/") {
+			cfg.EscalateModel = ""
+		}
+	}
+	// Same hygiene for Ollama, whose ids are "name[:tag]" — a "/" appears only
+	// in registry pulls ("hf.co/org/model:Q4"), which always carry a ":tag".
+	// An id with "/" but no ":" is an OpenRouter leftover from .env.
+	if cfg.Provider == ProviderOllama {
+		if strings.Contains(cfg.JudgeModel, "/") && !strings.Contains(cfg.JudgeModel, ":") {
+			cfg.JudgeModel = ""
+		}
+		if strings.Contains(cfg.EscalateModel, "/") && !strings.Contains(cfg.EscalateModel, ":") {
 			cfg.EscalateModel = ""
 		}
 	}
@@ -320,6 +364,7 @@ func Load(args []string) (*Config, error) {
 const (
 	ProviderOpenRouter = "openrouter"
 	ProviderClaude     = "claude"
+	ProviderOllama     = "ollama"
 )
 
 // Alignment-pass modes (mirrored in internal/translate).
@@ -339,6 +384,16 @@ const (
 const (
 	defaultOpenRouterModel = "google/gemini-2.5-flash"
 	defaultClaudeModel     = "claude-haiku-4-5"
+	defaultOllamaModel     = "translategemma:12b" // Gemma 3 translation fine-tune (ollama.com/library/translategemma)
+)
+
+// defaultOllamaConcurrency and defaultOllamaBatch replace the global defaults
+// when no flag/env sets them — a local server serializes past
+// OLLAMA_NUM_PARALLEL, and local translation fine-tunes drop most of a large
+// batch (see Load).
+const (
+	defaultOllamaConcurrency = 2
+	defaultOllamaBatch       = 4
 )
 
 // trimBookExt strips a known book extension (case-insensitive) so the default
