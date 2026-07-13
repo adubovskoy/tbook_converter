@@ -26,12 +26,23 @@ func LangName(code string) string {
 // and proper nouns stay consistent across every batch of the book.
 func translateSystemPrompt(sourceName, targetName string, glossary []GlossEntry) string {
 	r := strings.NewReplacer("{SRC}", sourceName, "{TGT}", targetName)
-	base := r.Replace(`You translate {SRC} → {TGT} for a language-learning reader.
+	base := r.Replace(`You translate {SRC} → {TGT} for a language-learning reader: the app shows your
+translation beside the original and highlights matching word pairs, so the reader
+constantly compares the two texts word by word.
 
 You receive a JSON array of sentences, each {id, src}.
 
 For EACH sentence, write a faithful, natural literary {TGT} translation of src:
-- Translate the meaning into fluent {TGT}; do not translate word-for-word.
+- Each sentence STANDS ALONE: translate exactly the content of its own src — never
+  borrow, merge, or shift words or meaning from a neighboring sentence in the batch.
+- COMPLETE and EXACT: every meaning element of src appears in the translation — no
+  dropped clause, modifier, or negation; nothing invented; numbers, names, and
+  quoted speech preserved.
+- Natural {TGT} comes first — but when two renderings are equally natural, prefer
+  the one that MIRRORS the source: give each content word an explicit {TGT}
+  counterpart, keep the source clause order, keep metaphors as images. Do not
+  paraphrase freely; split or merge clauses only where {TGT} grammar demands it.
+- Match the source register and tone: slang stays slang, formal stays formal.
 - Output PURE {TGT} — never leave {SRC} words in the translation.
 
 Reply with ONLY a single JSON object mapping each "id" (exact string) to its {TGT}

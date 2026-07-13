@@ -30,7 +30,7 @@ const PromptVersion = "v8"
 // TrPromptVersion keys the TRANSLATE (pass 1) contract separately, so an
 // align-only contract change re-aligns the book without re-translating it.
 // Bump only if the translation prompt/rules change.
-const TrPromptVersion = "v4"
+const TrPromptVersion = "v5"
 
 // Key returns the cache key for one sentence's FINAL aligned translation.
 func Key(src, source, target, model string) string {
