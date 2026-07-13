@@ -15,6 +15,7 @@ import (
 	"github.com/dimando/reader/converter/internal/embalign"
 	"github.com/dimando/reader/converter/internal/jsonx"
 	"github.com/dimando/reader/converter/internal/lexcheck"
+	"github.com/dimando/reader/converter/internal/progress"
 	"github.com/dimando/reader/converter/internal/segment"
 	"github.com/dimando/reader/converter/internal/tbook"
 	"github.com/schollz/progressbar/v3"
@@ -86,6 +87,10 @@ type Pipeline struct {
 	LexDicts   func(target string) *lexcheck.Dict
 	EmbQMin    float64
 
+	// Progress, when non-nil, receives machine-readable NDJSON progress
+	// events (--progress-file) alongside the human bars.
+	Progress *progress.Sink
+
 	mu          sync.Mutex
 	lastErr     error // most recent batch failure, for the leftovers warning
 	totalSents  int
@@ -93,6 +98,8 @@ type Pipeline struct {
 	okSents     int
 	leftSents   int
 	errSents    int
+	progTarget  string // current target language, for progress events
+	progTotal   int    // current phase's item count, for progress events
 }
 
 func (p *Pipeline) updateBarDescription(bar *progressbar.ProgressBar, name string) {
@@ -115,8 +122,10 @@ func (p *Pipeline) addBatchResult(bar *progressbar.ProgressBar, name string, fai
 	p.okSents += succeeded
 	p.leftSents -= (failed + succeeded)
 	p.errSents += failed
+	target, done, total := p.progTarget, p.progTotal-p.leftSents, p.progTotal
 	p.mu.Unlock()
 	p.updateBarDescription(bar, name)
+	p.Progress.Update(name, target, done, total)
 }
 
 // noteErr records a batch failure so the "sentences left" warning can say why.
@@ -279,7 +288,12 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 		dict = p.LexDicts(target)
 	}
 	bar := progressbar.Default(int64(len(items)), "embalign")
-	aligned, gated := 0, 0
+	aligned, gated, done := 0, 0, 0
+	step := func() { // one item processed: human bar + machine progress
+		_ = bar.Add(1)
+		done++
+		p.Progress.Update("embalign", target, done, len(items))
+	}
 	t0 := time.Now()
 
 	type prep struct {
@@ -298,7 +312,7 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 		for _, it := range items[start:end] {
 			raw, ok := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, model))
 			if !ok || strings.TrimSpace(raw.Text) == "" {
-				_ = bar.Add(1)
+				step()
 				continue // no raw translation to align; ships via the raw fallback
 			}
 			text := ensureListPrefix(it.s.Src, raw.Text)
@@ -357,7 +371,7 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 					leftover = append(leftover, pr.it)
 					gated++
 				}
-				_ = bar.Add(1)
+				step()
 				continue
 			}
 			chunks, q := embalign.Chunks(pairs, pr.trWords)
@@ -365,12 +379,12 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 			if p.AlignMode == AlignHybrid && p.rejectEmbedded(dict, pr.it.s, tr, target) {
 				leftover = append(leftover, pr.it)
 				gated++
-				_ = bar.Add(1)
+				step()
 				continue
 			}
 			_ = cache.Write(p.CacheDir, pr.it.key, tr)
 			aligned++
-			_ = bar.Add(1)
+			step()
 		}
 	}
 	if dead && next < len(items) {
@@ -381,6 +395,7 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 		}
 	}
 	_ = bar.Finish()
+	p.Progress.Final("embalign", target, done, len(items))
 	el := time.Since(t0)
 	fmt.Printf("[%s] embedding-aligned %d sentences locally; %d gated to the LLM align pass (%s, %.1f sent/s)\n",
 		target, aligned, gated, el.Round(time.Second), float64(len(items))/el.Seconds())
@@ -451,6 +466,12 @@ func (p *Pipeline) pendingTwoPhase(sentences []*tbook.Sentence, target string, f
 func (p *Pipeline) runPhase(ctx context.Context, system string, items []item, target string, ph phase) error {
 	model := p.cacheModel()
 	remaining := items
+	p.mu.Lock()
+	p.progTarget, p.progTotal = target, len(items)
+	p.mu.Unlock()
+	// The phase's closing progress line is guaranteed even when retries leave
+	// sentences behind (done < total then; the leftovers warning explains why).
+	defer func() { p.Progress.Final(ph.String(), target, len(items)-len(remaining), len(items)) }()
 	for round := 0; round < maxRounds && len(remaining) > 0; round++ {
 		p.mu.Lock()
 		p.leftSents = len(remaining)

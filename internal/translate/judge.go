@@ -15,8 +15,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/dimando/reader/converter/internal/jsonx"
+	"github.com/dimando/reader/converter/internal/progress"
 	"github.com/dimando/reader/converter/internal/tbook"
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/errgroup"
@@ -56,9 +58,10 @@ type judgeItem struct {
 // Judge runs the semantic verification pass over every unique sentence with a
 // non-empty translation, per target. Verdicts are cached in cacheDir (keyed by
 // judge model + src + translation + alignment), so re-runs only judge what
-// changed. jc is a client configured with the judge model.
+// changed. jc is a client configured with the judge model. prog, when non-nil,
+// receives per-batch progress events (--progress-file).
 func Judge(ctx context.Context, jc *Client, cacheDir, source string, targets []string,
-	sentences []*tbook.Sentence, batchSize, concurrency int) (JudgeReport, error) {
+	sentences []*tbook.Sentence, batchSize, concurrency int, prog *progress.Sink) (JudgeReport, error) {
 
 	rep := JudgeReport{Reasons: map[string]int{}}
 	flagged := map[string]bool{}
@@ -98,6 +101,11 @@ func Judge(ctx context.Context, jc *Client, cacheDir, source string, targets []s
 			batches = append(batches, todo[i:min(i+batchSize, len(todo))])
 		}
 		bar := progressbar.Default(int64(len(batches)), "judge "+target)
+		var jdone atomic.Int64
+		step := func() { // one batch processed: human bar + machine progress
+			_ = bar.Add(1)
+			prog.Update("judge", target, int(jdone.Add(1)), len(batches))
+		}
 		sys := judgeSystemPrompt(LangName(source), LangName(target))
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(max(1, concurrency))
@@ -116,7 +124,7 @@ func Judge(ctx context.Context, jc *Client, cacheDir, source string, targets []s
 				}
 				var raw json.RawMessage
 				if err := jc.ChatJSON(WithPhase(gctx, "judge"), sys, string(userJSON), &raw); err != nil {
-					_ = bar.Add(1)
+					step()
 					return abortOnly(err) // usage limit aborts; else left unjudged, reported below
 				}
 				out := parseVerdicts(raw)
@@ -127,12 +135,13 @@ func Judge(ctx context.Context, jc *Client, cacheDir, source string, targets []s
 					}
 					_ = writeVerdict(cacheDir, batch[n-1].key, v)
 				}
-				_ = bar.Add(1)
+				step()
 				return nil
 			})
 		}
 		gerr := g.Wait()
 		_ = bar.Finish()
+		prog.Final("judge", target, int(jdone.Load()), len(batches))
 		if gerr != nil {
 			return rep, gerr
 		}

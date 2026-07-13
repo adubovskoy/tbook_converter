@@ -83,7 +83,7 @@ func Parse(path string) (*epub.Book, error) {
 	}
 
 	book := &epub.Book{}
-	book.Title, book.Author, book.Cover = metadata(root)
+	book.Title, book.Author, book.Language, book.Cover = metadata(root)
 	if book.Title == "" {
 		book.Title = fb2ExtRE.ReplaceAllString(filepath.Base(path), "")
 	}
@@ -191,16 +191,16 @@ func buildDOM(data []byte) (*elem, error) {
 	return nil, fmt.Errorf("no root element")
 }
 
-// metadata extracts title, author and cover bytes from description/title-info
-// and the referenced <binary>.
-func metadata(root *elem) (title, author string, cover []byte) {
+// metadata extracts title, author, language and cover bytes from
+// description/title-info and the referenced <binary>.
+func metadata(root *elem) (title, author, lang string, cover []byte) {
 	desc := root.child("description")
 	if desc == nil {
-		return "", "", nil
+		return "", "", "", nil
 	}
 	ti := desc.child("title-info")
 	if ti == nil {
-		return "", "", nil
+		return "", "", "", nil
 	}
 	coverHref := ""
 	for _, k := range ti.kids {
@@ -234,6 +234,10 @@ func metadata(root *elem) (title, author string, cover []byte) {
 				}
 				author = segment.CleanText(strings.TrimSpace(first + " " + last))
 			}
+		case "lang":
+			if lang == "" {
+				lang = strings.TrimSpace(el.text())
+			}
 		case "coverpage":
 			if coverHref == "" {
 				if img := findImage(el); img != nil {
@@ -242,7 +246,7 @@ func metadata(root *elem) (title, author string, cover []byte) {
 			}
 		}
 	}
-	return title, author, binaryBytes(root, coverHref)
+	return title, author, lang, binaryBytes(root, coverHref)
 }
 
 // findImage returns the first <image> descendant.

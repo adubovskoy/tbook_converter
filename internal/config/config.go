@@ -54,6 +54,7 @@ type Config struct {
 	CacheDir      string
 	LimitChapters int
 	DryRun        bool
+	Estimate      bool // parse + segment only; print one JSON estimate object to stdout, exit
 	Force         bool
 	Verbose       bool
 
@@ -77,6 +78,11 @@ type Config struct {
 	// StatsPath, when set, appends one JSONL record per LLM request attempt
 	// (latency, status, tokens, cost, provider) for offline analysis.
 	StatsPath string
+
+	// ProgressFile, when set, appends machine-readable NDJSON progress events
+	// during a real conversion (see internal/progress) for an external
+	// supervisor to tail.
+	ProgressFile string
 
 	// Alignment pass. "hybrid" (default) = local embedding aligner with LLM
 	// fallback for gated sentences; "emb" = embedding aligner only; "llm" =
@@ -137,6 +143,7 @@ func Load(args []string) (*Config, error) {
 	maxRetries := fs.Int("max-retries", envInt("MAX_RETRIES", 4), "per-request retry attempts")
 	limit := fs.Int("limit-chapters", 0, "only convert the first N chapters (0 = all)")
 	dryRun := fs.Bool("dry-run", false, "parse + segment only; no API calls, no output")
+	estimate := fs.Bool("estimate", false, "parse + segment only; print a single JSON object (title, author, detected language, chapters/sentences/words/chars) to stdout and exit — no API calls, no key needed")
 	force := fs.Bool("force", false, "force re-translation, ignoring cached entries (overwrites cache)")
 	invalidate := fs.String("invalidate", "", "verify/QA loop: clear cached translation+alignment for the "+
 		"source sentences in FILE (JSON array of strings, or one per line), then exit")
@@ -169,6 +176,7 @@ func Load(args []string) (*Config, error) {
 	embMethod := fs.String("embalign-method", envOr("EMBALIGN_METHOD", "argmax"), "embedding aligner matching: argmax (precision-first) | itermax (recall-first)")
 	embQ := fs.Float64("embalign-q", envFloat("EMBALIGN_Q", 0.7), "hybrid gate: alignment-coverage threshold below which the LLM align pass redoes the sentence")
 	stats := fs.String("stats", envOr("STATS_PATH", ""), "append per-request metrics (latency, status, tokens, cost) as JSONL to this file")
+	progressFile := fs.String("progress-file", envOr("PROGRESS_FILE", ""), "append machine-readable NDJSON progress events (phase, done, total) to this file during conversion")
 	providerSort := fs.String("provider-sort", envOr("PROVIDER_SORT", ""), "OpenRouter provider routing: throughput (fastest tokens/sec) | latency | price (empty = default routing)")
 	providerOrder := fs.String("provider-order", envOr("PROVIDER_ORDER", ""), "pin OpenRouter providers by slug, comma-separated in priority order (e.g. alibaba)")
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
@@ -219,6 +227,7 @@ func Load(args []string) (*Config, error) {
 		CacheDir:        *cacheDir,
 		LimitChapters:   *limit,
 		DryRun:          *dryRun,
+		Estimate:        *estimate,
 		Force:           *force,
 		Verbose:         verbose || verboseSh,
 		KeepMatter:      *keepMatter,
@@ -232,6 +241,7 @@ func Load(args []string) (*Config, error) {
 		JudgeScope:      strings.ToLower(strings.TrimSpace(*judgeScope)),
 		JudgeInvalidate: *judgeInvalidate,
 		StatsPath:       *stats,
+		ProgressFile:    *progressFile,
 		EscalateModel:   *escalateModel,
 		Lexcheck:        !*noLexcheck,
 		LexiconDir:      *lexiconDir,

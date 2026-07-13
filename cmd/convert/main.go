@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/dimando/reader/converter/internal/cache"
 	"github.com/dimando/reader/converter/internal/config"
@@ -31,6 +32,7 @@ import (
 	"github.com/dimando/reader/converter/internal/epub"
 	"github.com/dimando/reader/converter/internal/fb2"
 	"github.com/dimando/reader/converter/internal/lexcheck"
+	"github.com/dimando/reader/converter/internal/progress"
 	"github.com/dimando/reader/converter/internal/segment"
 	"github.com/dimando/reader/converter/internal/tbook"
 	"github.com/dimando/reader/converter/internal/translate"
@@ -39,6 +41,11 @@ import (
 // statsLog is the shared per-request JSONL sink (--stats); nil = disabled.
 // Package-level so every pass's client (translate, judge, escalate) shares it.
 var statsLog *translate.Stats
+
+// progressLog is the NDJSON progress-event sink (--progress-file); nil =
+// disabled (every call site is nil-safe). Package-level for the same reason
+// as statsLog: the pipeline, judge, and assembly all report into it.
+var progressLog *progress.Sink
 
 func main() {
 	if err := run(); err != nil {
@@ -55,6 +62,11 @@ func run() error {
 	cfg, err := config.Load(os.Args[1:])
 	if err != nil {
 		return err
+	}
+	// --estimate: parse + segment only, print ONE JSON object to stdout, exit.
+	// Handled before any other setup so nothing else can reach stdout.
+	if cfg.Estimate {
+		return runEstimate(cfg)
 	}
 	if cfg.StatsPath != "" {
 		statsLog, err = translate.OpenStats(cfg.StatsPath)
@@ -81,6 +93,24 @@ func run() error {
 		return nil
 	}
 
+	// Machine-readable NDJSON progress events for a supervising process
+	// (--progress-file / PROGRESS_FILE); real conversions only — a --dry-run
+	// must not create the file.
+	if cfg.ProgressFile != "" && !cfg.DryRun {
+		progressLog, err = progress.Open(cfg.ProgressFile)
+		if err != nil {
+			return fmt.Errorf("open --progress-file: %w", err)
+		}
+		defer progressLog.Close()
+	}
+	err = convert(cfg, runStart)
+	progressLog.Done(err) // best-effort terminal event; nil-safe when disabled
+	return err
+}
+
+// convert is the full conversion path — everything after flag and sink setup.
+func convert(cfg *config.Config, runStart time.Time) error {
+	var err error
 	// Load the source book (no API). Two inputs are accepted:
 	//   • an .epub  — parsed + segmented (the fresh-conversion path);
 	//   • a .tbook — read back so a new target language can be added without the
@@ -270,6 +300,7 @@ func run() error {
 			Force:       cfg.Force,
 			Glossary:    glossary, CacheModel: cacheModel,
 			AlignMode: cfg.AlignMode, EmbQMin: cfg.EmbQMin,
+			Progress: progressLog,
 		}
 		if cfg.AlignMode != config.AlignLLM {
 			fmt.Printf("Starting embedding aligner (%s, %s) ...\n", cfg.EmbModel, cfg.EmbMethod)
@@ -359,6 +390,7 @@ func run() error {
 	}
 
 	fmt.Printf("Writing %s ...\n", cfg.Out)
+	progressLog.Update("assemble", "", 0, 1)
 	out := &tbook.Book{
 		Title: title, Author: author,
 		Source: cfg.Source, Targets: writeTargets,
@@ -368,6 +400,7 @@ func run() error {
 	if err := tbook.Write(cfg.Out, out); err != nil {
 		return fmt.Errorf("assemble: %w", err)
 	}
+	progressLog.Update("assemble", "", 1, 1)
 	if fi, err := os.Stat(cfg.Out); err == nil {
 		fmt.Printf("Done. %s (%d KB)\n", cfg.Out, fi.Size()/1024)
 	}
@@ -721,8 +754,10 @@ func reverifyEscalated(ctx context.Context, cfg *config.Config, glossary []trans
 		}
 		if cfg.Judge {
 			jc := translate.NewClient(clientOptions(cfg, cfg.JudgeModel, 0))
+			// No progress sink: re-verification covers a small escalated
+			// subset and would only emit confusing extra "judge" phases.
 			rep, err := translate.Judge(ctx, jc, cfg.CacheDir, cfg.Source, cfg.Targets,
-				set, max(1, cfg.BatchSize/2), cfg.Concurrency)
+				set, max(1, cfg.BatchSize/2), cfg.Concurrency, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -795,7 +830,7 @@ func runJudge(ctx context.Context, cfg *config.Config, sentences []*tbook.Senten
 	// full alignment, and verdict quality drops with oversized prompts (capped
 	// at 16 so a big --batch-size doesn't degrade verdicts).
 	batch := max(1, min(16, cfg.BatchSize/2))
-	rep, err := translate.Judge(ctx, jc, cfg.CacheDir, cfg.Source, cfg.Targets, sentences, batch, cfg.Concurrency)
+	rep, err := translate.Judge(ctx, jc, cfg.CacheDir, cfg.Source, cfg.Targets, sentences, batch, cfg.Concurrency, progressLog)
 	if err != nil {
 		return nil, err
 	}
@@ -866,6 +901,111 @@ func status(r tbook.Report) string {
 		return "PROBLEM"
 	}
 	return "OK (some sentences untranslated)"
+}
+
+// estimateOut is the --estimate JSON schema. It is a machine contract (the
+// web service parses it) — extend it, never rename fields.
+type estimateOut struct {
+	Title            string   `json:"title"`
+	Author           string   `json:"author"`
+	DetectedLanguage *string  `json:"detectedLanguage"` // null when the book carries no language metadata
+	Chapters         int      `json:"chapters"`
+	Sentences        int      `json:"sentences"`     // prose + caption + table-cell sentences fed to translation
+	NoteSentences    int      `json:"noteSentences"` // footnote sentences (citations included)
+	Words            int      `json:"words"`         // same whitespace-token approximation --dry-run reports
+	Chars            int      `json:"chars"`         // rune count of every source sentence, notes included
+	Warnings         []string `json:"warnings"`
+}
+
+// runEstimate is the --estimate mode: parse + segment (the same path as
+// --dry-run — no API calls, no key, no python) and print exactly one JSON
+// object to stdout. Everything else stays off stdout.
+func runEstimate(cfg *config.Config) error {
+	var book *epub.Book
+	var err error
+	switch lower := strings.ToLower(cfg.Input); {
+	case strings.HasSuffix(lower, ".fb2") || strings.HasSuffix(lower, ".fb2.zip"):
+		book, err = fb2.Parse(cfg.Input)
+		if err != nil {
+			return fmt.Errorf("parse fb2: %w", err)
+		}
+	case strings.HasSuffix(lower, ".tbook"):
+		return fmt.Errorf("--estimate takes a source book (.epub/.fb2), not a .tbook")
+	default:
+		book, err = epub.ParseOpts(cfg.Input, epub.Options{
+			SkipMatter: !cfg.KeepMatter,
+			SkipExtra:  cfg.SkipFiles,
+			NoImages:   cfg.NoImages,
+			NoNotes:    cfg.NoNotes,
+		})
+		if err != nil {
+			return fmt.Errorf("parse epub: %w", err)
+		}
+	}
+	chapters := book.Chapters
+	if cfg.LimitChapters > 0 && cfg.LimitChapters < len(chapters) {
+		chapters = chapters[:cfg.LimitChapters]
+	}
+	outChapters, sentences := segment.BuildSentenceObjects(chapters, cfg.Source)
+	_, noteSents, citeSents := segment.BuildNotes(book.Notes, cfg.Source)
+
+	est := estimateOut{
+		Title:         book.Title,
+		Author:        book.Author,
+		Chapters:      len(outChapters),
+		Sentences:     len(sentences),
+		NoteSentences: len(noteSents) + len(citeSents),
+		Warnings:      []string{}, // [] not null in the JSON
+	}
+	for _, s := range sentences {
+		est.Words += len(s.Words)
+		est.Chars += utf8.RuneCountInString(s.Src)
+	}
+	for _, s := range noteSents {
+		est.Chars += utf8.RuneCountInString(s.Src)
+	}
+	for _, s := range citeSents {
+		est.Chars += utf8.RuneCountInString(s.Src)
+	}
+	if lang := normalizeLang(book.Language); lang != "" {
+		est.DetectedLanguage = &lang
+	} else {
+		est.Warnings = append(est.Warnings, "no language metadata found")
+	}
+	b, err := json.MarshalIndent(est, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
+	return nil
+}
+
+// iso3to2 maps the ISO 639-2 codes seen in real book metadata to ISO 639-1.
+var iso3to2 = map[string]string{
+	"eng": "en", "deu": "de", "ger": "de", "fra": "fr", "fre": "fr",
+	"rus": "ru", "spa": "es", "ita": "it", "por": "pt", "nld": "nl",
+	"dut": "nl", "pol": "pl", "ukr": "uk", "tur": "tr",
+}
+
+// normalizeLang reduces a metadata language tag to its lowercase primary
+// subtag ("en-US" → "en", "eng" → "en"); "" when absent or unusable.
+func normalizeLang(tag string) string {
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	if i := strings.IndexAny(tag, "-_"); i >= 0 {
+		tag = tag[:i]
+	}
+	for _, r := range tag {
+		if r < 'a' || r > 'z' {
+			return ""
+		}
+	}
+	if two, ok := iso3to2[tag]; ok {
+		return two
+	}
+	if len(tag) < 2 || len(tag) > 3 {
+		return ""
+	}
+	return tag
 }
 
 func printDryRun(sentences []*tbook.Sentence, chapters []tbook.Chapter, notes map[string]*tbook.Note) {

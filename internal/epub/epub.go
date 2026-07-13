@@ -43,6 +43,7 @@ func fixSelfClosing(s string) string {
 type Book struct {
 	Title    string
 	Author   string
+	Language string // dc:language metadata as declared (e.g. "en", "en-US"); "" if absent
 	Cover    []byte // nil if none
 	Chapters []segment.ParsedChapter
 	Images   map[string][]byte    // output entry name ("images/imgN.ext") → bytes
@@ -65,9 +66,10 @@ type container struct {
 
 type opf struct {
 	Metadata struct {
-		Title   []string `xml:"title"`   // dc:title
-		Creator []string `xml:"creator"` // dc:creator
-		Metas   []struct {
+		Title    []string `xml:"title"`    // dc:title
+		Creator  []string `xml:"creator"`  // dc:creator
+		Language []string `xml:"language"` // dc:language
+		Metas    []struct {
 			Name    string `xml:"name,attr"`
 			Content string `xml:"content,attr"`
 		} `xml:"meta"`
@@ -163,9 +165,10 @@ func ParseOpts(epubPath string, opts Options) (*Book, error) {
 	}
 
 	book := &Book{
-		Title:  firstNonEmpty(pkg.Metadata.Title),
-		Author: firstNonEmpty(pkg.Metadata.Creator),
-		Cover:  extractCover(files, pkg, opfDir, hrefByID),
+		Title:    firstNonEmpty(pkg.Metadata.Title),
+		Author:   firstNonEmpty(pkg.Metadata.Creator),
+		Language: firstNonEmpty(pkg.Metadata.Language),
+		Cover:    extractCover(files, pkg, opfDir, hrefByID),
 	}
 	if book.Title == "" {
 		book.Title = strings.TrimSuffix(path.Base(epubPath), path.Ext(epubPath))

@@ -81,6 +81,25 @@ Core: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
 `.tbook_cache`), `--limit-chapters N`, `--dry-run`, `--force` (ignore cache),
 `--stats file.jsonl` (per-request latency/provider/tokens/cost log), `-v`.
 
+Machine integration (for scripts and services driving the converter):
+
+- `--estimate` — parse + segment only (no API calls, no key, no python) and
+  print exactly one JSON object to stdout, then exit 0:
+  `{title, author, detectedLanguage, chapters, sentences, noteSentences,
+  words, chars, warnings}`. `detectedLanguage` comes from the EPUB
+  `dc:language` / FB2 `<lang>` metadata, normalized to a lowercase two-letter
+  code (`en-US` → `en`); `null` plus a warning when the book carries none.
+  Nothing else is written to stdout; parse failures exit non-zero with
+  `error: …` on stderr.
+- `--progress-file file.ndjson` (env `PROGRESS_FILE`) — during a real
+  conversion, append NDJSON progress events (one JSON per line, flushed per
+  write, throttled to ≤ ~2 lines/sec per phase, final line of a phase always
+  written): `{"ts":…,"phase":"translate|embalign|align|judge","target":"ru",
+  "done":128,"total":9391}`, then `{"phase":"assemble","done":1,"total":1}`
+  and finally `{"phase":"done","ok":true}` (`ok:false` + `error` on a fatal
+  failure). The human progress bars are unchanged; `--dry-run`/`--estimate`
+  never create the file.
+
 Performance (defaults are measured optima — change only with reason):
 `--batch-size` (16; bigger is *slower* — generation is output-bound),
 `--concurrency` (32; gemini took 48 with zero 429s — lower for `:free` models),

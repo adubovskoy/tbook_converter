@@ -95,7 +95,7 @@ func run(path, src, tgt, model, judgeModel, cacheDir, lexDir string, batch, alig
 			Model: judgeModel, Temperature: 0, JSONMode: true, MaxRetries: 4,
 		})
 		for name, set := range map[string][]*tbook.Sentence{"live": sentences, "drifted": drifted} {
-			rep, err := translate.Judge(ctx, jc, cacheDir, src, []string{tgt}, set, 4, 4)
+			rep, err := translate.Judge(ctx, jc, cacheDir, src, []string{tgt}, set, 4, 4, nil)
 			if err != nil {
 				return err
 			}
