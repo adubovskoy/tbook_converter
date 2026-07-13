@@ -414,7 +414,7 @@ const (
 
 // Per-provider model defaults.
 const (
-	defaultOpenRouterModel = "google/gemini-2.5-flash"
+	defaultOpenRouterModel = "google/gemini-3.1-flash-lite"
 	defaultClaudeModel     = "claude-haiku-4-5"
 	defaultOllamaModel     = "translategemma:12b" // Gemma 3 translation fine-tune (ollama.com/library/translategemma)
 )

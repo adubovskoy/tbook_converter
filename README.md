@@ -27,7 +27,7 @@ tools/fetch-lexicons.sh en-ru   # dictionary for the free drift check
 
 No further flags needed — **the defaults are the measured optimum**
 (see [the speed report](https://github.com/adubovskoy/tbook_converter/issues/2)): a 200k-word novel converts in
-**~15 minutes for ~$2** on the default `google/gemini-2.5-flash`.
+**~15 minutes for ~$1.30** on the default `google/gemini-3.1-flash-lite`.
 Runs are resumable: interrupt and re-run to continue from the cache; a
 fully-cached run assembles offline without an API key.
 
