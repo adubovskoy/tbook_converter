@@ -17,6 +17,7 @@ import (
 	"github.com/dimando/reader/converter/internal/lexcheck"
 	"github.com/dimando/reader/converter/internal/progress"
 	"github.com/dimando/reader/converter/internal/segment"
+	"github.com/dimando/reader/converter/internal/stopwords"
 	"github.com/dimando/reader/converter/internal/tbook"
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/errgroup"
@@ -37,9 +38,13 @@ const (
 )
 
 // DefaultEmbQMin is the hybrid-gate coverage threshold: an embedding
-// alignment covering less than this fraction of translation words goes to the
-// LLM align pass instead. Measured on an en→ru novel, 0.7 routes ~7% of
-// sentences to the LLM (together with the lexcheck part of the gate).
+// alignment covering less than this fraction of the translation's CONTENT
+// words (all words when the target has no stopword list) goes to the LLM
+// align pass instead. Content-word coverage, because function words —
+// articles, clitics, copulas — routinely and harmlessly ship unaligned and
+// their noise drowns the gate's real signal, an unaligned content word.
+// Measured on an en→ru novel, 0.7 over all words routed ~7% of sentences to
+// the LLM (together with the lexcheck part of the gate).
 const DefaultEmbQMin = 0.7
 
 // WordAligner is the embedding aligner interface (satisfied by
@@ -287,6 +292,7 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 	if p.LexDicts != nil {
 		dict = p.LexDicts(target)
 	}
+	stop := stopwords.Set(target)
 	bar := progressbar.Default(int64(len(items)), "embalign")
 	aligned, gated, done := 0, 0, 0
 	step := func() { // one item processed: human bar + machine progress
@@ -376,7 +382,8 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 			}
 			chunks, q := embalign.Chunks(pairs, pr.trWords)
 			tr := tbook.Translation{Text: pr.text, Align: chunks, Q: q}
-			if p.AlignMode == AlignHybrid && p.rejectEmbedded(dict, pr.it.s, tr, target) {
+			qGate := embalign.ContentQ(chunks, pr.trWords, pr.text, stop)
+			if p.AlignMode == AlignHybrid && p.rejectEmbedded(dict, pr.it.s, tr, qGate, target) {
 				leftover = append(leftover, pr.it)
 				gated++
 				step()
@@ -402,15 +409,16 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 	return leftover
 }
 
-// rejectEmbedded is the hybrid gate: too-low alignment coverage, or a
-// lexcheck flag (drift/wrong-word evidence), sends the sentence to the LLM
-// align pass instead.
-func (p *Pipeline) rejectEmbedded(dict *lexcheck.Dict, s *tbook.Sentence, tr tbook.Translation, target string) bool {
+// rejectEmbedded is the hybrid gate: too-low alignment coverage (q is the
+// content-word score from embalign.ContentQ), or a lexcheck flag
+// (drift/wrong-word evidence), sends the sentence to the LLM align pass
+// instead.
+func (p *Pipeline) rejectEmbedded(dict *lexcheck.Dict, s *tbook.Sentence, tr tbook.Translation, q float64, target string) bool {
 	qmin := p.EmbQMin
 	if qmin == 0 {
 		qmin = DefaultEmbQMin
 	}
-	if tr.Q < qmin {
+	if q < qmin {
 		return true
 	}
 	if dict != nil {

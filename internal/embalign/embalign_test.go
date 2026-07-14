@@ -44,6 +44,28 @@ func TestChunksEmpty(t *testing.T) {
 	}
 }
 
+func TestContentQ(t *testing.T) {
+	// "Yo estaba nervioso": estaba is a stopword; only Yo is aligned.
+	text := "Yo estaba nervioso"
+	trWords := [][2]int{{0, 2}, {3, 9}, {10, 18}}
+	chunks, _ := Chunks([][2]int{{0, 0}}, trWords)
+	stop := map[string]bool{"estaba": true}
+
+	// Content words: Yo, nervioso — 1 of 2 covered.
+	if q := ContentQ(chunks, trWords, text, stop); q != 0.5 {
+		t.Errorf("content q = %v, want 0.5", q)
+	}
+	// Nil stop set falls back to all-word coverage: 1 of 3.
+	if q := ContentQ(chunks, trWords, text, nil); q != 1.0/3.0 {
+		t.Errorf("all-word q = %v, want 1/3", q)
+	}
+	// All words stopped: falls back to all-word coverage too.
+	all := map[string]bool{"yo": true, "estaba": true, "nervioso": true}
+	if q := ContentQ(chunks, trWords, text, all); q != 1.0/3.0 {
+		t.Errorf("all-stop q = %v, want 1/3", q)
+	}
+}
+
 func TestWordStrings(t *testing.T) {
 	text := "Утром июня"
 	got := WordStrings(text, [][2]int{{0, 5}, {6, 10}, {8, 99}})

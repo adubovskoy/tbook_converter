@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/dimando/reader/converter/internal/tbook"
@@ -266,6 +267,55 @@ func Chunks(pairs [][2]int, trWords [][2]int) ([]tbook.AlignChunk, float64) {
 		q = float64(len(byTgt)) / float64(len(trWords))
 	}
 	return chunks, q
+}
+
+// ContentQ recomputes Chunks' coverage over content words only: the fraction
+// of translation words whose lowercased text is NOT in stop that are claimed
+// by a chunk with ≥1 source word. Function words (articles, clitics, copulas)
+// routinely and harmlessly ship unaligned, so the all-word score lets their
+// noise drown the gate's real signal — an unaligned content word. Falls back
+// to the all-word score when stop is nil or no content word remains.
+func ContentQ(chunks []tbook.AlignChunk, trWords [][2]int, text string, stop map[string]bool) float64 {
+	allQ := func() float64 {
+		if len(trWords) == 0 {
+			return 0
+		}
+		return float64(coveredWords(chunks, trWords, nil)) / float64(len(trWords))
+	}
+	if stop == nil {
+		return allQ()
+	}
+	words := WordStrings(text, trWords)
+	content := make([]bool, len(trWords))
+	n := 0
+	for i, w := range words {
+		if !stop[strings.ToLower(w)] {
+			content[i] = true
+			n++
+		}
+	}
+	if n == 0 {
+		return allQ()
+	}
+	return float64(coveredWords(chunks, trWords, content)) / float64(n)
+}
+
+// coveredWords counts translation words (those with keep[i], or all when keep
+// is nil) overlapped by a chunk that claims ≥1 source word.
+func coveredWords(chunks []tbook.AlignChunk, trWords [][2]int, keep []bool) int {
+	covered := 0
+	for i, w := range trWords {
+		if keep != nil && !keep[i] {
+			continue
+		}
+		for _, c := range chunks {
+			if len(c.W) > 0 && c.T[0] < w[1] && w[0] < c.T[1] {
+				covered++
+				break
+			}
+		}
+	}
+	return covered
 }
 
 // WordStrings extracts the word substrings for [start,end) rune offsets.
