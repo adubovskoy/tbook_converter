@@ -144,24 +144,44 @@ func normalizeSentences(sents []*Sentence) {
 	}
 }
 
-// coverageQ is the per-sentence alignment-coverage score: the fraction of
-// rendered translation words (chunks containing a letter/digit) whose chunk
-// highlights ≥1 source word. 0 when nothing is rendered or aligned.
+// coverageQ is the per-sentence alignment-coverage score: the fraction of the
+// translation's words (maximal letter/digit runs of Text) overlapped by a
+// chunk that highlights ≥1 source word. Words no chunk claims count against
+// the score — iterating over chunks instead would miss them and report ~1 for
+// any non-empty alignment. 0 when nothing is rendered or aligned.
 func coverageQ(tr Translation) float64 {
 	if tr.Text == "" || len(tr.Align) == 0 {
 		return 0
 	}
 	runes := []rune(tr.Text)
-	words, aligned := 0, 0
+	type span struct{ a, b int }
+	covered := make([]span, 0, len(tr.Align))
 	for _, c := range tr.Align {
-		a, b := clampRange(c.T[0], c.T[1], len(runes))
-		if !hasLetterOrDigit(runes[a:b]) {
+		if len(c.W) == 0 {
 			continue
 		}
-		words++
-		if len(c.W) > 0 {
-			aligned++
+		if a, b := clampRange(c.T[0], c.T[1], len(runes)); a < b {
+			covered = append(covered, span{a, b})
 		}
+	}
+	words, aligned := 0, 0
+	for i := 0; i < len(runes); {
+		if !isLetterOrDigit(runes[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(runes) && isLetterOrDigit(runes[j]) {
+			j++
+		}
+		words++
+		for _, s := range covered {
+			if s.a < j && i < s.b {
+				aligned++
+				break
+			}
+		}
+		i = j
 	}
 	if words == 0 {
 		return 0
@@ -182,13 +202,8 @@ func clampRange(a, b, n int) (int, int) {
 	return a, b
 }
 
-func hasLetterOrDigit(rs []rune) bool {
-	for _, r := range rs {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return true
-		}
-	}
-	return false
+func isLetterOrDigit(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 // trimStyles returns the per-paragraph role array padded/clamped to nParas and

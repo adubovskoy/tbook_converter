@@ -128,4 +128,12 @@ func TestCoverageQ(t *testing.T) {
 	if q := coverageQ(Translation{Text: "", Align: nil}); q != 0 {
 		t.Fatalf("empty q = %v, want 0", q)
 	}
+	// Words no chunk claims still count: 1 of 3 words covered, not 1 of 1.
+	sparse := Translation{
+		Text:  "Yo estaba nervioso",
+		Align: []AlignChunk{{T: [2]int{3, 9}, W: []int{0}}}, // estaba only
+	}
+	if q := coverageQ(sparse); q != 0.33 {
+		t.Fatalf("sparse q = %v, want 0.33", q)
+	}
 }
