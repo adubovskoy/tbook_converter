@@ -156,3 +156,42 @@ func TestBuildNotesSeparatesCitations(t *testing.T) {
 		t.Fatalf("n2 paragraphs = %+v", out["n2"].Paragraphs)
 	}
 }
+
+func TestInsertTitleHeading(t *testing.T) {
+	ch := ParsedChapter{
+		Title: "I. A SCANDAL IN BOHEMIA",
+		Paragraphs: []ParsedParagraph{
+			{Text: "To Sherlock Holmes she is always the woman.", Role: tbook.RoleBody},
+		},
+	}
+	InsertTitleHeading(&ch)
+	if len(ch.Paragraphs) != 2 {
+		t.Fatalf("paragraphs = %d, want 2 (title heading + body)", len(ch.Paragraphs))
+	}
+	if h := ch.Paragraphs[0]; h.Role != tbook.RoleHeading || h.Text != ch.Title {
+		t.Fatalf("paragraph 0 = %+v, want the title as heading", h)
+	}
+
+	// Idempotent: an equal leading heading is not duplicated.
+	InsertTitleHeading(&ch)
+	if len(ch.Paragraphs) != 2 {
+		t.Fatalf("paragraphs after second insert = %d, want 2", len(ch.Paragraphs))
+	}
+
+	// A different leading heading (a section title) stays below the inserted title.
+	ch2 := ParsedChapter{
+		Title:      "Chapter One",
+		Paragraphs: []ParsedParagraph{{Text: "PART ONE", Role: tbook.RoleHeading}},
+	}
+	InsertTitleHeading(&ch2)
+	if len(ch2.Paragraphs) != 2 || ch2.Paragraphs[0].Text != "Chapter One" {
+		t.Fatalf("paragraphs = %+v, want inserted title above section heading", ch2.Paragraphs)
+	}
+
+	// Blank titles insert nothing.
+	empty := ParsedChapter{Paragraphs: []ParsedParagraph{{Text: "x", Role: tbook.RoleBody}}}
+	InsertTitleHeading(&empty)
+	if len(empty.Paragraphs) != 1 {
+		t.Fatalf("blank title inserted a heading: %+v", empty.Paragraphs)
+	}
+}

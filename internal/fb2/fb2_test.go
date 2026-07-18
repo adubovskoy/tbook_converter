@@ -88,8 +88,10 @@ func TestParseFB2(t *testing.T) {
 		texts = append(texts, p.Text)
 		roles = append(roles, p.Role)
 	}
-	wantTexts := []string{"He was very tired.", "", "A bold subtitle", "Nested part", "Nested body text."}
-	wantRoles := []string{tbook.RoleBody, tbook.RoleSceneBreak, tbook.RoleSubtitle, tbook.RoleHeading, tbook.RoleBody}
+	// The chapter title is re-inserted as a leading heading paragraph so it
+	// gets translated and stays tappable.
+	wantTexts := []string{"Глава 1", "He was very tired.", "", "A bold subtitle", "Nested part", "Nested body text."}
+	wantRoles := []string{tbook.RoleHeading, tbook.RoleBody, tbook.RoleSceneBreak, tbook.RoleSubtitle, tbook.RoleHeading, tbook.RoleBody}
 	for i := range wantTexts {
 		if i >= len(texts) || texts[i] != wantTexts[i] || roles[i] != wantRoles[i] {
 			t.Fatalf("paragraphs = %v %v, want %v %v", texts, roles, wantTexts, wantRoles)
@@ -97,14 +99,14 @@ func TestParseFB2(t *testing.T) {
 	}
 
 	// Emphasis spans survive cleaning with correct rune offsets.
-	body := ch.Paragraphs[0]
+	body := ch.Paragraphs[1]
 	if len(body.Spans) != 1 || body.Spans[0].K != tbook.SpanItalic {
 		t.Fatalf("body spans = %+v", body.Spans)
 	}
 	if got := body.Text[body.Spans[0].S:body.Spans[0].E]; got != "very" {
 		t.Errorf("italic span text = %q", got)
 	}
-	sub := ch.Paragraphs[2]
+	sub := ch.Paragraphs[3]
 	if len(sub.Spans) != 1 || sub.Spans[0].K != tbook.SpanBold {
 		t.Fatalf("subtitle spans = %+v", sub.Spans)
 	}
@@ -159,7 +161,10 @@ func TestParseFB2Windows1251(t *testing.T) {
 	if book.Title != "Тест" || book.Author != "Иван Петров" {
 		t.Errorf("cp1251: title=%q author=%q", book.Title, book.Author)
 	}
-	if len(book.Chapters) != 1 || book.Chapters[0].Paragraphs[0].Text != "Привет, мир." {
+	// Paragraph 0 is the re-inserted title heading, 1 the body prose.
+	if len(book.Chapters) != 1 || len(book.Chapters[0].Paragraphs) != 2 ||
+		book.Chapters[0].Paragraphs[0].Text != "Глава" ||
+		book.Chapters[0].Paragraphs[1].Text != "Привет, мир." {
 		t.Errorf("cp1251 chapters = %+v", book.Chapters)
 	}
 }

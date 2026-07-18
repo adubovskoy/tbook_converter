@@ -111,6 +111,12 @@ func Parse(path string) (*epub.Book, error) {
 			book.Chapters = append(book.Chapters, sectionToChapter(body))
 		}
 	}
+	// Re-insert each chapter's title as a leading heading paragraph (the
+	// section's <title> went to ch.Title, not the body), so the rendered
+	// title is translated and tappable like any prose.
+	for i := range book.Chapters {
+		segment.InsertTitleHeading(&book.Chapters[i])
+	}
 	return book, nil
 }
 

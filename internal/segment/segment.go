@@ -88,6 +88,28 @@ func CleanText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// InsertTitleHeading prepends the chapter's title as a heading-role paragraph
+// so it is translated, aligned, and tappable like any prose. Consumers can
+// render this heading directly instead of synthesizing an untranslated one
+// from ChapterRef.title (which remains the TOC/navigation title). Skipped for
+// blank titles and when an equal heading already leads the chapter.
+func InsertTitleHeading(ch *ParsedChapter) {
+	title := CleanText(ch.Title)
+	if title == "" {
+		return
+	}
+	if len(ch.Paragraphs) > 0 {
+		p0 := ch.Paragraphs[0]
+		if p0.Role == tbook.RoleHeading && strings.EqualFold(CleanText(p0.Text), title) {
+			return
+		}
+	}
+	ch.Paragraphs = append(
+		[]ParsedParagraph{{Text: title, Role: tbook.RoleHeading}},
+		ch.Paragraphs...,
+	)
+}
+
 // CleanTextWithMap is CleanText plus a rune-index map: ret[i] is the rune index
 // in the cleaned string for rune i of s (len(ret) == runeCount(s)+1, with the
 // final entry == len(clean)). Whitespace runes map to the next kept rune. It lets

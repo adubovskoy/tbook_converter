@@ -268,7 +268,7 @@ func ParseOpts(epubPath string, opts Options) (*Book, error) {
 	// translation/alignment like any prose, so the rendered title becomes
 	// tappable. Runs after dropEmptyChapters so a bare title page stays dropped.
 	for i := range book.Chapters {
-		insertTitleHeading(&book.Chapters[i])
+		segment.InsertTitleHeading(&book.Chapters[i])
 	}
 	return book, nil
 }
@@ -350,28 +350,6 @@ func dedupTitleHeadings(ch *segment.ParsedChapter) {
 		}
 		ch.Paragraphs = ch.Paragraphs[1:]
 	}
-}
-
-// insertTitleHeading prepends the chapter's title as a heading-role paragraph
-// so it is translated, aligned, and tappable like any prose. Consumers can
-// render this heading directly instead of synthesizing an untranslated one
-// from ChapterRef.title (which remains the TOC/navigation title). Skipped for
-// blank titles and when an identical heading already leads the chapter.
-func insertTitleHeading(ch *segment.ParsedChapter) {
-	title := segment.CleanText(ch.Title)
-	if title == "" {
-		return
-	}
-	if len(ch.Paragraphs) > 0 {
-		p0 := ch.Paragraphs[0]
-		if p0.Role == tbook.RoleHeading && foldLatin(p0.Text) == foldLatin(title) {
-			return
-		}
-	}
-	ch.Paragraphs = append(
-		[]segment.ParsedParagraph{{Text: title, Role: tbook.RoleHeading}},
-		ch.Paragraphs...,
-	)
 }
 
 // cleanupSceneBreaks drops scene breaks before the first content paragraph and
