@@ -262,6 +262,14 @@ func ParseOpts(epubPath string, opts Options) (*Book, error) {
 	}
 	// Drop bare title-page chapters (no prose) that would render blank.
 	book.Chapters = dropEmptyChapters(book.Chapters)
+	// Re-insert each chapter's title as a leading heading paragraph. Parsing
+	// always extracts the title OUT of the prose (title1 divs, div.chapter
+	// leading headings, NCX-echo dedup); a heading paragraph flows through
+	// translation/alignment like any prose, so the rendered title becomes
+	// tappable. Runs after dropEmptyChapters so a bare title page stays dropped.
+	for i := range book.Chapters {
+		insertTitleHeading(&book.Chapters[i])
+	}
 	return book, nil
 }
 
@@ -324,7 +332,8 @@ func foldLatin(s string) string {
 // dedupTitleHeadings drops a chapter's leading heading paragraphs when they
 // merely repeat (parts of) the NCX title — e.g. "CAPÍTULO" / "1" / "El
 // sorprendente poder…" under an NCX title "Capítulo 1. El sorprendente
-// poder…" — so the title is not rendered twice.
+// poder…" — so the title is not rendered twice. insertTitleHeading later puts
+// the canonical NCX title back as a single heading paragraph.
 func dedupTitleHeadings(ch *segment.ParsedChapter) {
 	ft := foldLatin(ch.Title)
 	if ft == "" {
@@ -341,6 +350,28 @@ func dedupTitleHeadings(ch *segment.ParsedChapter) {
 		}
 		ch.Paragraphs = ch.Paragraphs[1:]
 	}
+}
+
+// insertTitleHeading prepends the chapter's title as a heading-role paragraph
+// so it is translated, aligned, and tappable like any prose. Consumers can
+// render this heading directly instead of synthesizing an untranslated one
+// from ChapterRef.title (which remains the TOC/navigation title). Skipped for
+// blank titles and when an identical heading already leads the chapter.
+func insertTitleHeading(ch *segment.ParsedChapter) {
+	title := segment.CleanText(ch.Title)
+	if title == "" {
+		return
+	}
+	if len(ch.Paragraphs) > 0 {
+		p0 := ch.Paragraphs[0]
+		if p0.Role == tbook.RoleHeading && foldLatin(p0.Text) == foldLatin(title) {
+			return
+		}
+	}
+	ch.Paragraphs = append(
+		[]segment.ParsedParagraph{{Text: title, Role: tbook.RoleHeading}},
+		ch.Paragraphs...,
+	)
 }
 
 // cleanupSceneBreaks drops scene breaks before the first content paragraph and

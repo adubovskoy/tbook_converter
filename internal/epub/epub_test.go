@@ -247,6 +247,49 @@ func TestHrSceneBreakOnlyMidChapter(t *testing.T) {
 	}
 }
 
+func TestInsertTitleHeading(t *testing.T) {
+	ch := segment.ParsedChapter{
+		Title: "I. A SCANDAL IN BOHEMIA",
+		Paragraphs: []segment.ParsedParagraph{
+			{Text: "To Sherlock Holmes she is always the woman.", Role: tbook.RoleBody},
+		},
+	}
+	insertTitleHeading(&ch)
+	if len(ch.Paragraphs) != 2 {
+		t.Fatalf("paragraphs = %d, want 2 (title heading + body)", len(ch.Paragraphs))
+	}
+	if h := ch.Paragraphs[0]; h.Role != tbook.RoleHeading || h.Text != ch.Title {
+		t.Fatalf("paragraph 0 = %+v, want the title as heading", h)
+	}
+
+	// Idempotent: an identical leading heading is not duplicated.
+	insertTitleHeading(&ch)
+	if len(ch.Paragraphs) != 2 {
+		t.Fatalf("paragraphs after second insert = %d, want 2", len(ch.Paragraphs))
+	}
+
+	// A different leading heading (a section title) stays below the inserted one.
+	ch2 := segment.ParsedChapter{
+		Title: "Chapter One",
+		Paragraphs: []segment.ParsedParagraph{
+			{Text: "PART ONE", Role: tbook.RoleHeading},
+		},
+	}
+	insertTitleHeading(&ch2)
+	if len(ch2.Paragraphs) != 2 || ch2.Paragraphs[0].Text != "Chapter One" {
+		t.Fatalf("paragraphs = %+v, want inserted title above section heading", ch2.Paragraphs)
+	}
+
+	// Blank titles insert nothing.
+	empty := segment.ParsedChapter{
+		Paragraphs: []segment.ParsedParagraph{{Text: "x", Role: tbook.RoleBody}},
+	}
+	insertTitleHeading(&empty)
+	if len(empty.Paragraphs) != 1 {
+		t.Fatalf("blank title inserted a heading: %+v", empty.Paragraphs)
+	}
+}
+
 func TestMatterSkipPatterns(t *testing.T) {
 	for _, s := range []string{"Portada", "Sinopsis", "Créditos", "Índice", "Notas", "notas", "Table of Contents"} {
 		if !isMatter(s) {
