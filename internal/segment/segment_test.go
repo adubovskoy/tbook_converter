@@ -103,6 +103,118 @@ func TestSplitSentencesUnchanged(t *testing.T) {
 	}
 }
 
+func TestSplitSentencesInsideQuotes(t *testing.T) {
+	seg := sentencizer.NewSegmenter("en")
+
+	// The motivating case: a long multi-sentence quotation must not come back
+	// as one giant sentence (the sentencizer masks punctuation inside quotes).
+	para := "“Indeed, I should have thought a little more. Just a trifle more, I fancy, Watson. And in practice again, I observe. You did not tell me that you intended to go into harness.”"
+	want := []string{
+		"“Indeed, I should have thought a little more.",
+		"Just a trifle more, I fancy, Watson.",
+		"And in practice again, I observe.",
+		"You did not tell me that you intended to go into harness.”",
+	}
+	if got := SplitSentences(para, seg); !reflect.DeepEqual(got, want) {
+		t.Fatalf("SplitSentences = %#v, want %#v", got, want)
+	}
+
+	// The speech tag stays attached to the quote's last sentence.
+	got := SplitSentences("“One is here. Two follow now,” he said.", seg)
+	want = []string{"“One is here.", "Two follow now,” he said."}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SplitSentences = %#v, want %#v", got, want)
+	}
+
+	// Straight double quotes and single-sentence quotes around them.
+	got = SplitSentences(`"Wonderful!" I ejaculated. "You did not tell me. And in practice, I observe."`, seg)
+	want = []string{`"Wonderful!"`, "I ejaculated.", `"You did not tell me.`, `And in practice, I observe."`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SplitSentences = %#v, want %#v", got, want)
+	}
+
+	// Abbreviations inside quotes must NOT split (interior is re-segmented by
+	// the same pysbd-style segmenter, not a naive period regex).
+	got = SplitSentences("“Mr. Watson stayed at home.”", seg)
+	if len(got) != 1 {
+		t.Fatalf("abbreviation split: %#v", got)
+	}
+
+	// Guillemets.
+	got = SplitSentences("«One is here. Two follow now.»", seg)
+	want = []string{"«One is here.", "Two follow now.»"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SplitSentences = %#v, want %#v", got, want)
+	}
+
+	// Slanted single quotes, with an apostrophe inside (must not close early).
+	// The narration after the closing quote splits off too: the masking also
+	// suppressed that boundary.
+	got = SplitSentences("He said, ‘It’s a fine day. Let’s walk on.’ He rose.", seg)
+	want = []string{"He said, ‘It’s a fine day.", "Let’s walk on.’", "He rose."}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SplitSentences = %#v, want %#v", got, want)
+	}
+
+	// Same for double quotes: quote ends the sentence, narration follows.
+	got = SplitSentences("He said, “Stop here. Go back.” Then he left.", seg)
+	want = []string{"He said, “Stop here.", "Go back.”", "Then he left."}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SplitSentences = %#v, want %#v", got, want)
+	}
+
+	// A speech tag after a non-final comma inside the quote must NOT split off.
+	got = SplitSentences("“Two follow now,” he said. Nothing more.", seg)
+	want = []string{"“Two follow now,” he said.", "Nothing more."}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SplitSentences = %#v, want %#v", got, want)
+	}
+
+	// A quote late in the paragraph also swallows the boundaries in the plain
+	// text BEFORE it (the library's priorIndex port bug): the prefix must be
+	// re-split, while the introducing clause stays attached to its quote.
+	got = SplitSentences("They teach you to let go. Stick it in neutral. The last thing she said was: “Don’t worry kid, they’ll store it.” Then she bent her head. And it was over.", seg)
+	want = []string{
+		"They teach you to let go.",
+		"Stick it in neutral.",
+		"The last thing she said was: “Don’t worry kid, they’ll store it.”",
+		"Then she bent her head.",
+		"And it was over.",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SplitSentences = %#v, want %#v", got, want)
+	}
+
+	// An abbreviation right before a quote must not be mistaken for a
+	// sentence end (endsSentence consults the segmenter, not a period regex).
+	got = SplitSentences("He shouted at Mr. “Big Shot” loudly. Nothing happened.", seg)
+	want = []string{"He shouted at Mr. “Big Shot” loudly.", "Nothing happened."}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SplitSentences = %#v, want %#v", got, want)
+	}
+}
+
+func TestSegmentParagraphSpansAcrossQuoteSplit(t *testing.T) {
+	seg := sentencizer.NewSegmenter("en")
+	// "harness" is emphasized inside the second quoted sentence; after the
+	// quote split it must land on that sub-sentence, rebased to local offsets.
+	text := "“Stay right here. You intended to go into harness.”"
+	res := segmentParagraph(text, []tbook.Span{{S: 42, E: 49, K: tbook.SpanItalic}}, nil, seg)
+	if len(res) != 2 {
+		t.Fatalf("got %d sentences, want 2: %+v", len(res), res)
+	}
+	if len(res[0].Spans) != 0 {
+		t.Fatalf("sentence 0 spans = %+v, want none", res[0].Spans)
+	}
+	if len(res[1].Spans) != 1 {
+		t.Fatalf("sentence 1 spans = %+v, want 1", res[1].Spans)
+	}
+	sp := res[1].Spans[0]
+	if got := string([]rune(res[1].Src)[sp.S:sp.E]); got != "harness" {
+		t.Fatalf("emphasized = %q, want \"harness\"", got)
+	}
+}
+
 func TestSegmentParagraphDistributesMarks(t *testing.T) {
 	seg := sentencizer.NewSegmenter("en")
 	// Marker 1 sits right after "tired." (end of sentence 1); marker 2 mid-word

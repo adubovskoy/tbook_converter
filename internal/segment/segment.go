@@ -9,6 +9,7 @@ package segment
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -186,28 +187,207 @@ func segmentNorm(norm string, seg sentencizer.Segmenter) (sents []string, ranges
 	}
 	b2r := byteToRune(norm)
 	cur := 0
-	for _, piece := range seg.Segment(norm) {
-		piece = strings.TrimSpace(piece)
-		if piece == "" {
+	for _, raw := range seg.Segment(norm) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
 			continue
 		}
-		idx := strings.Index(norm[cur:], piece)
-		if idx >= 0 {
-			idx += cur
-		} else if idx = strings.Index(norm, piece); idx < 0 {
-			sents = append(sents, piece)
-			ranges = append(ranges, [2]int{-1, -1})
-			continue
+		for _, piece := range splitQuoted(raw, seg) {
+			idx := strings.Index(norm[cur:], piece)
+			if idx >= 0 {
+				idx += cur
+			} else if idx = strings.Index(norm, piece); idx < 0 {
+				sents = append(sents, piece)
+				ranges = append(ranges, [2]int{-1, -1})
+				continue
+			}
+			end := idx + len(piece)
+			cur = end
+			sents = append(sents, norm[idx:end])
+			ranges = append(ranges, [2]int{b2r[idx], b2r[end]})
 		}
-		end := idx + len(piece)
-		cur = end
-		sents = append(sents, norm[idx:end])
-		ranges = append(ranges, [2]int{b2r[idx], b2r[end]})
 	}
 	if len(sents) == 0 {
 		return []string{norm}, [][2]int{{0, b2r[len(norm)]}}
 	}
 	return sents, ranges
+}
+
+// quotedRegionREs are the quote pairs whose interiors the sentencizer library
+// masks before boundary detection (its between-punctuation pass), so a
+// multi-sentence quotation comes back as ONE piece. Straight single quotes are
+// left out: they double as apostrophes, and the library's own masking of them
+// is guarded/rare, so there is usually no join to undo.
+var quotedRegionREs = []*regexp.Regexp{
+	regexp.MustCompile(`“[^”]*”`),
+	regexp.MustCompile(`«[^»]*»`),
+	regexp.MustCompile(`"[^"]*"`),
+	regexp.MustCompile(`‘(?:[^’]|’\p{L})*’`), // ’ before a letter = apostrophe, not a closer
+}
+
+var (
+	// A quote whose interior ends in sentence-final punctuation terminates its
+	// sentence at the closing quote…
+	quoteEndsSentenceRE = regexp.MustCompile(`[.!?…]["»”’')\]]?$`)
+	// …when followed by the start of a new sentence (mirrors how the
+	// segmenter splits after unmasked quotes, e.g. "Wonderful!" | I ejaculated.).
+	nextSentStartRE = regexp.MustCompile(`^(\s+)["“«‘']?\p{Lu}`)
+)
+
+const quoteChars = `“«"‘`
+
+// splitQuoted re-splits one segmenter piece at the sentence boundaries the
+// segmenter suppressed because of quote pairs. The suppression is twofold:
+// by design, the between-punctuation masking joins a multi-sentence quotation
+// into one piece; and a port bug in the library's sentenceBoundaryPunctuation
+// (priorIndex) makes a late quote also swallow boundaries in the plain text
+// before it. So both the quote interiors and the fragments outside the quotes
+// are re-segmented standalone (where neither effect applies) and the piece is
+// cut at every boundary found. The opening quote stays with the quote's first
+// sentence, the closing quote (plus any speech tag) with its last. Returned
+// pieces are trimmed verbatim substrings of piece, in order; quoteless pieces
+// come back as-is.
+func splitQuoted(piece string, seg sentencizer.Segmenter) []string {
+	cuts := quoteCuts(piece, seg, 3)
+	if len(cuts) == 0 {
+		return []string{piece}
+	}
+	sort.Ints(cuts)
+	out := make([]string, 0, len(cuts)+1)
+	prev := 0
+	for _, c := range cuts {
+		if c <= prev || c >= len(piece) {
+			continue
+		}
+		if s := strings.TrimSpace(piece[prev:c]); s != "" {
+			out = append(out, s)
+		}
+		prev = c
+	}
+	if s := strings.TrimSpace(piece[prev:]); s != "" {
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return []string{piece}
+	}
+	return out
+}
+
+// quoteCuts returns the byte offsets within piece where it must be cut. depth
+// bounds recursion into nested quotes.
+func quoteCuts(piece string, seg sentencizer.Segmenter, depth int) []int {
+	if depth == 0 || !strings.ContainsAny(piece, quoteChars) {
+		return nil
+	}
+	regions := quoteRegions(piece)
+	if len(regions) == 0 {
+		return nil
+	}
+	var cuts []int
+	pos := 0
+	for _, r := range regions {
+		outside := piece[pos:r[0]]
+		cuts = append(cuts, fragmentCuts(outside, pos, seg)...)
+		// A completed sentence before the quote: the quote starts a new one.
+		if endsSentence(strings.TrimSpace(outside), seg) {
+			cuts = append(cuts, r[0])
+		}
+		_, osz := utf8.DecodeRuneInString(piece[r[0]:])
+		_, csz := utf8.DecodeLastRuneInString(piece[:r[1]])
+		is, ie := r[0]+osz, r[1]-csz
+		inner := piece[is:ie]
+		cuts = append(cuts, fragmentCuts(inner, is, seg)...)
+		for _, c := range quoteCuts(inner, seg, depth-1) {
+			cuts = append(cuts, is+c)
+		}
+		// The boundary after the closing quote: cut when the quote ends its
+		// sentence and a new one follows.
+		if endsSentence(inner, seg) {
+			if m := nextSentStartRE.FindStringSubmatchIndex(piece[r[1]:]); m != nil {
+				cuts = append(cuts, r[1]+m[3]) // after the whitespace run
+			}
+		}
+		pos = r[1]
+	}
+	cuts = append(cuts, fragmentCuts(piece[pos:], pos, seg)...)
+	return cuts
+}
+
+// quoteRegions returns the non-overlapping quote-pair regions of piece as
+// [start,end) byte ranges, in order. On overlap the earlier/longer region
+// wins; regions nested inside it are found by quoteCuts' recursion instead.
+func quoteRegions(piece string) [][2]int {
+	var all [][2]int
+	for _, re := range quotedRegionREs {
+		for _, loc := range re.FindAllStringIndex(piece, -1) {
+			all = append(all, [2]int{loc[0], loc[1]})
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i][0] != all[j][0] {
+			return all[i][0] < all[j][0]
+		}
+		return all[i][1] > all[j][1]
+	})
+	out := all[:0]
+	end := 0
+	for _, r := range all {
+		if r[0] >= end {
+			out = append(out, r)
+			end = r[1]
+		}
+	}
+	return out
+}
+
+// fragmentCuts re-segments one quote-free fragment of a piece standalone and
+// returns the absolute (base-offset) byte positions where each sentence after
+// the first starts. Non-verbatim segmenter output yields no reliable offset
+// and is skipped (conservative: fewer cuts).
+func fragmentCuts(fragment string, base int, seg sentencizer.Segmenter) []int {
+	if strings.TrimSpace(fragment) == "" {
+		return nil
+	}
+	var cuts []int
+	cur := 0
+	first := true
+	for _, s := range seg.Segment(fragment) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		idx := strings.Index(fragment[cur:], s)
+		if idx < 0 {
+			continue
+		}
+		idx += cur
+		cur = idx + len(s)
+		if !first {
+			cuts = append(cuts, base+idx)
+		}
+		first = false
+	}
+	return cuts
+}
+
+// endsSentence reports whether text ends a complete sentence, per the
+// segmenter itself (so abbreviations like "Mr." don't count): appending a
+// capitalized probe word must yield one more segment than text alone.
+func endsSentence(text string, seg sentencizer.Segmenter) bool {
+	if text == "" || !quoteEndsSentenceRE.MatchString(text) {
+		return false
+	}
+	return countSegments(text+" Next.", seg) > countSegments(text, seg)
+}
+
+func countSegments(text string, seg sentencizer.Segmenter) int {
+	n := 0
+	for _, s := range seg.Segment(text) {
+		if strings.TrimSpace(s) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // sentResult is one segmented sentence plus its emphasis spans and footnote
