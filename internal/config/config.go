@@ -20,13 +20,16 @@ type Config struct {
 	Out   string
 
 	// Provider selects the LLM backend: "openrouter" (metered HTTP API,
-	// needs OPENROUTER_API_KEY), "claude" (the `claude` CLI in print mode —
-	// runs on the user's Claude subscription, no API key, no per-token cost),
-	// "ollama" (a local model served by Ollama's OpenAI-compatible API —
-	// free and offline, no key; needs `ollama serve` + a pulled model), or
-	// "llamacpp" (a local llama.cpp `llama-server`, also OpenAI-compatible;
-	// serves ONE model and ignores the requested id — with no LLAMACPP_MODEL
-	// set, the served model's name is adopted for cache keys and logs).
+	// needs OPENROUTER_API_KEY), "gonka" (the proxy.gonka.gg gateway to the
+	// Gonka decentralized compute network — OpenAI-compatible, needs
+	// GONKA_API_KEY, near-free per token), "claude" (the `claude` CLI in
+	// print mode — runs on the user's Claude subscription, no API key, no
+	// per-token cost), "ollama" (a local model served by Ollama's
+	// OpenAI-compatible API — free and offline, no key; needs `ollama serve`
+	// + a pulled model), or "llamacpp" (a local llama.cpp `llama-server`,
+	// also OpenAI-compatible; serves ONE model and ignores the requested id —
+	// with no LLAMACPP_MODEL set, the served model's name is adopted for
+	// cache keys and logs).
 	Provider  string
 	ClaudeBin string // claude CLI path; "" = "claude" from $PATH
 
@@ -133,9 +136,9 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&source, "source", envOr("SOURCE_LANG", "en"), "source language code")
 	fs.StringVar(&sourceShort, "s", "", "shorthand for --source")
 	provider := fs.String("provider", envOr("PROVIDER", "openrouter"),
-		"LLM backend: openrouter (metered API) | claude (claude CLI on your Claude subscription; no API key) | ollama, llamacpp (local server; no key)")
+		"LLM backend: openrouter (metered API) | gonka (proxy.gonka.gg gateway; near-free) | claude (claude CLI on your Claude subscription; no API key) | ollama, llamacpp (local server; no key)")
 	model := fs.String("model", "",
-		"model id (default: MODEL env or "+defaultOpenRouterModel+" for openrouter; CLAUDE_MODEL env or "+defaultClaudeModel+" for claude; OLLAMA_MODEL env or "+defaultOllamaModel+" for ollama; LLAMACPP_MODEL env or the served model for llamacpp)")
+		"model id (default: MODEL env or "+defaultOpenRouterModel+" for openrouter; GONKA_MODEL env or "+defaultGonkaModel+" for gonka; CLAUDE_MODEL env or "+defaultClaudeModel+" for claude; OLLAMA_MODEL env or "+defaultOllamaModel+" for ollama; LLAMACPP_MODEL env or the served model for llamacpp)")
 	cacheDir := fs.String("cache-dir", envOr("CACHE_DIR", ".tbook_cache"), "translation cache directory")
 	batchSize := fs.Int("batch-size", envInt("BATCH_SIZE", 16), "sentences per API request")
 	alignBatch := fs.Int("align-batch", envInt("ALIGN_BATCH", 0), "sentences per ALIGN request (0 = batch-size/4; small align batches curb positional drift)")
@@ -258,14 +261,18 @@ func Load(args []string) (*Config, error) {
 		cfg.Provider = ProviderLlamaCpp
 	}
 	switch cfg.Provider {
-	case ProviderOpenRouter, ProviderClaude, ProviderOllama, ProviderLlamaCpp:
+	case ProviderOpenRouter, ProviderGonka, ProviderClaude, ProviderOllama, ProviderLlamaCpp:
 	default:
-		return nil, fmt.Errorf("unknown --provider %q (want openrouter, claude, ollama or llamacpp)", cfg.Provider)
+		return nil, fmt.Errorf("unknown --provider %q (want openrouter, gonka, claude, ollama or llamacpp)", cfg.Provider)
 	}
 	// Ollama and llama-server speak the OpenAI API locally and need no key
 	// (the *_API_KEY vars exist for llama-server's --api-key or a reverse
-	// proxy). The OPENROUTER_* endpoint/key from .env must not leak into them.
+	// proxy). The OPENROUTER_* endpoint/key from .env must not leak into
+	// them — nor into the Gonka gateway, which has its own key and endpoint.
 	switch cfg.Provider {
+	case ProviderGonka:
+		cfg.BaseURL = strings.TrimRight(envOr("GONKA_BASE_URL", "https://proxy.gonka.gg/v1"), "/")
+		cfg.APIKey = os.Getenv("GONKA_API_KEY")
 	case ProviderOllama:
 		cfg.BaseURL = strings.TrimRight(envOr("OLLAMA_BASE_URL", "http://localhost:11434/v1"), "/")
 		cfg.APIKey = os.Getenv("OLLAMA_API_KEY")
@@ -299,6 +306,8 @@ func Load(args []string) (*Config, error) {
 	// CLI or an Ollama server (which would fail every call on an unknown model).
 	if cfg.Model == "" {
 		switch cfg.Provider {
+		case ProviderGonka:
+			cfg.Model = envOr("GONKA_MODEL", defaultGonkaModel)
 		case ProviderClaude:
 			cfg.Model = envOr("CLAUDE_MODEL", defaultClaudeModel)
 		case ProviderOllama:
@@ -314,9 +323,12 @@ func Load(args []string) (*Config, error) {
 	}
 	local := cfg.Provider == ProviderOllama || cfg.Provider == ProviderLlamaCpp
 	// A claude CLI call carries process-startup overhead on top of generation,
-	// and local inference is slow outright; give both a roomier default
-	// timeout (explicit REQUEST_TIMEOUT_SEC still wins).
-	if (cfg.Provider == ProviderClaude || local) && os.Getenv("REQUEST_TIMEOUT_SEC") == "" {
+	// local inference is slow outright, and Gonka's decentralized hosts serve
+	// reasoning models with variable latency (MiniMax-M2 can't stop thinking);
+	// give all three a roomier default timeout (explicit REQUEST_TIMEOUT_SEC
+	// still wins).
+	if (cfg.Provider == ProviderClaude || cfg.Provider == ProviderGonka || local) &&
+		os.Getenv("REQUEST_TIMEOUT_SEC") == "" {
 		cfg.Timeout = 300 * time.Second
 	}
 	// A local server runs a few requests at once (OLLAMA_NUM_PARALLEL,
@@ -394,6 +406,7 @@ func Load(args []string) (*Config, error) {
 // avoid an import cycle risk — config is a leaf).
 const (
 	ProviderOpenRouter = "openrouter"
+	ProviderGonka      = "gonka"
 	ProviderClaude     = "claude"
 	ProviderOllama     = "ollama"
 	ProviderLlamaCpp   = "llamacpp"
@@ -415,6 +428,7 @@ const (
 // Per-provider model defaults.
 const (
 	defaultOpenRouterModel = "google/gemini-3.1-flash-lite"
+	defaultGonkaModel      = "moonshotai/Kimi-K2.6" // honors thinking-off; MiniMax-M2.7 always reasons
 	defaultClaudeModel     = "claude-haiku-4-5"
 	defaultOllamaModel     = "translategemma:12b" // Gemma 3 translation fine-tune (ollama.com/library/translategemma)
 )

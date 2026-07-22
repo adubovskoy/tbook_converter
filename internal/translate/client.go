@@ -19,20 +19,19 @@ import (
 	"github.com/dimando/reader/converter/internal/align"
 )
 
-// LLM backends. OpenRouter is the metered HTTP API; Claude shells out to the
+// LLM backends. OpenRouter is the metered HTTP API; Gonka is the
+// proxy.gonka.gg gateway to the Gonka decentralized compute network (also
+// OpenAI-compatible, keyed, near-free per token); Claude shells out to the
 // `claude` CLI in print mode, so batches run on the user's Claude subscription
 // (OAuth) with no per-token billing; Ollama and LlamaCpp post to a local
 // server's OpenAI-compatible API (free, offline, no key).
 const (
 	ProviderOpenRouter = "openrouter"
+	ProviderGonka      = "gonka"
 	ProviderClaude     = "claude"
 	ProviderOllama     = "ollama"
 	ProviderLlamaCpp   = "llamacpp"
 )
-
-// localProvider reports whether p is a local OpenAI-compatible server, which
-// gets no OpenRouter request extensions.
-func localProvider(p string) bool { return p == ProviderOllama || p == ProviderLlamaCpp }
 
 // Options configures the LLM client.
 type Options struct {
@@ -91,7 +90,24 @@ type chatRequest struct {
 	Temperature    float64         `json:"temperature"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 	Provider       *providerPrefs  `json:"provider,omitempty"`
-	Usage          *usageOpt       `json:"usage,omitempty"` // OpenRouter usage accounting (cost per request)
+	Usage          *usageOpt       `json:"usage,omitempty"`     // OpenRouter usage accounting (cost per request)
+	Thinking       *thinkingOpt    `json:"thinking,omitempty"`  // Gonka: reasoning off for models that honor it
+	Reasoning      *reasoningOpt   `json:"reasoning,omitempty"` // OpenRouter: unified reasoning switch
+}
+
+// reasoningOpt is OpenRouter's unified reasoning control; {"enabled":false}
+// turns reasoning off on hybrid models and is a no-op on the rest.
+type reasoningOpt struct {
+	Enabled bool `json:"enabled"`
+}
+
+// thinkingOpt is the Anthropic-style reasoning switch the Gonka gateway
+// forwards to its models. {"type":"disabled"} turns Kimi-K2.6's reasoning off
+// (measured: 975→30 output tokens, 16s→1s on a one-sentence batch);
+// MiniMax-M2.7 always thinks and ignores it — its inline <think> block is
+// stripped at parse time instead.
+type thinkingOpt struct {
+	Type string `json:"type"`
 }
 
 type usageOpt struct {
@@ -176,13 +192,23 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 		}
 		// Provider routing and usage accounting are OpenRouter extensions;
 		// keep them out of requests to other OpenAI-compatible servers.
-		if !localProvider(c.opts.Provider) {
+		if c.opts.Provider == "" || c.opts.Provider == ProviderOpenRouter {
 			if c.opts.ProviderSort != "" || len(c.opts.ProviderOrder) > 0 {
 				req.Provider = &providerPrefs{Sort: c.opts.ProviderSort, Order: c.opts.ProviderOrder}
 			}
 			if c.opts.Stats != nil {
 				req.Usage = &usageOpt{Include: true}
 			}
+			// Hybrid-reasoning models (glm-5.2: 229 reasoning tokens and 8×
+			// the cost on a one-sentence probe) reason by default; the
+			// pipeline never reads reasoning, so switch it off. No-op for
+			// non-reasoning models like the gemini default.
+			req.Reasoning = &reasoningOpt{Enabled: false}
+		}
+		// Gonka serves reasoning models; a translation batch never wants the
+		// reasoning (it inflates output tokens and latency, not quality).
+		if c.opts.Provider == ProviderGonka {
+			req.Thinking = &thinkingOpt{Type: "disabled"}
 		}
 		payload, err := json.Marshal(req)
 		if err != nil {
@@ -387,7 +413,7 @@ func (c *Client) Translate(ctx context.Context, system, userJSON string) (map[st
 // judge passes.
 func (c *Client) ChatJSON(ctx context.Context, system, userJSON string, out any) error {
 	return c.chat(ctx, system, userJSON, func(content string) error {
-		s := stripFences(content)
+		s := stripFences(stripThink(content))
 		if err := json.Unmarshal([]byte(s), out); err != nil {
 			if obj := extractObject(s); obj != "" {
 				return json.Unmarshal([]byte(obj), out)
@@ -484,9 +510,9 @@ func (c *Client) once(ctx context.Context, payload []byte, rec *statRec) (string
 }
 
 // parseChunks extracts the id→chunks object from model output, tolerating code
-// fences and surrounding prose.
+// fences, surrounding prose, and a leading <think> block.
 func parseChunks(content string) (map[string][]align.Chunk, error) {
-	s := stripFences(content)
+	s := stripFences(stripThink(content))
 	var m map[string][]align.Chunk
 	if err := json.Unmarshal([]byte(s), &m); err == nil {
 		return m, nil
@@ -503,7 +529,7 @@ func parseChunks(content string) (map[string][]align.Chunk, error) {
 // parseTexts extracts the id→translation-string object from a translate-pass
 // reply, tolerating code fences and surrounding prose (mirrors parseChunks).
 func parseTexts(content string) (map[string]string, error) {
-	s := stripFences(content)
+	s := stripFences(stripThink(content))
 	var m map[string]string
 	if err := json.Unmarshal([]byte(s), &m); err == nil {
 		return m, nil
@@ -515,6 +541,22 @@ func parseTexts(content string) (map[string]string, error) {
 	} else {
 		return nil, err
 	}
+}
+
+// stripThink drops the leading <think>…</think> block some reasoning models
+// (MiniMax-M2, local qwen/deepseek builds) emit inside message content — it
+// routinely mentions JSON braces, which would derail extractObject. An
+// unterminated block means the answer never started: return "" so the parse
+// fails and the attempt is retried.
+func stripThink(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "<think>") {
+		return s
+	}
+	if _, after, ok := strings.Cut(s, "</think>"); ok {
+		return strings.TrimSpace(after)
+	}
+	return ""
 }
 
 func stripFences(s string) string {

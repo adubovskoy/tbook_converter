@@ -46,6 +46,15 @@ A plain run does, in order:
    `<out>.lexflagged.json`.
 6. **Assemble + validate** — structure, offsets, and alignment coverage.
 
+Near-free alternative: `./convert book.epub --provider gonka` sends batches to
+the [Gonka](https://gonka.ai) decentralized compute network via the
+[proxy.gonka.gg](https://proxy.gonka.gg) gateway (OpenAI-compatible; set
+`GONKA_API_KEY`). Pricing is ~$0.0001 per 1M tokens — a whole book costs a
+fraction of a cent. Default model `moonshotai/Kimi-K2.6` (reasoning is switched
+off automatically); `MiniMaxAI/MiniMax-M2.7` is also served but always reasons,
+paying reasoning latency on every batch (its inline `<think>` output is
+stripped at parse time).
+
 If you can't/won't use an API key: `./convert book.epub --provider claude`
 runs every batch on your logged-in `claude` CLI subscription (default model
 `claude-haiku-4-5`; `MODEL` in `.env` is OpenRouter-only and never leaks into
@@ -77,7 +86,7 @@ Settings precedence: **flags > shell env > `.env` > defaults**.
 ## Flags
 
 Core: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
-`--provider` (`openrouter`|`claude`|`ollama`|`llamacpp`), `--model`, `--cache-dir` (default
+`--provider` (`openrouter`|`gonka`|`claude`|`ollama`|`llamacpp`), `--model`, `--cache-dir` (default
 `.tbook_cache`), `--limit-chapters N`, `--dry-run`, `--force` (ignore cache),
 `--stats file.jsonl` (per-request latency/provider/tokens/cost log), `-v`.
 

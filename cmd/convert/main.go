@@ -256,6 +256,11 @@ func convert(cfg *config.Config, runStart time.Time) error {
 				fmt.Printf("note: the llama.cpp server serves %s, not %q — requests use the served model; cache keys keep %q\n",
 					strings.Join(served, ", "), cfg.Model, cfg.Model)
 			}
+		case config.ProviderGonka:
+			if cfg.APIKey == "" && countPending() > 0 {
+				return fmt.Errorf("%d sentences need translating but GONKA_API_KEY is not set "+
+					"(get a key at https://proxy.gonka.gg and put it in converter/.env)", countPending())
+			}
 		default:
 			if cfg.APIKey == "" && countPending() > 0 {
 				return fmt.Errorf("%d sentences need translating but OPENROUTER_API_KEY is not set "+
@@ -285,6 +290,8 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	if pending := countPending(); pending > 0 {
 		via := cfg.Model
 		switch cfg.Provider {
+		case config.ProviderGonka:
+			via = cfg.Model + " (gonka at " + cfg.BaseURL + ")"
 		case config.ProviderClaude:
 			via = "claude CLI (subscription) / " + cfg.Model
 		case config.ProviderOllama:
