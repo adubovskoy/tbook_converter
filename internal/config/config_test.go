@@ -13,7 +13,8 @@ func clearProviderEnv(t *testing.T) {
 	for _, k := range []string{
 		"PROVIDER", "MODEL", "CLAUDE_MODEL", "OLLAMA_MODEL", "OLLAMA_BASE_URL", "OLLAMA_API_KEY",
 		"LLAMACPP_MODEL", "LLAMACPP_BASE_URL", "LLAMACPP_API_KEY",
-		"OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "CONCURRENCY", "BATCH_SIZE", "REQUEST_TIMEOUT_SEC",
+		"GONKA_MODEL", "GONKA_BASE_URL", "GONKA_API_KEY",
+		"OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "CONCURRENCY", "BATCH_SIZE", "MAX_RETRIES", "REQUEST_TIMEOUT_SEC",
 		"JUDGE_MODEL", "ESCALATE_MODEL", "ALIGN_MODE",
 	} {
 		t.Setenv(k, "")
@@ -151,8 +152,52 @@ func TestOpenRouterDefaultsUnchanged(t *testing.T) {
 	if cfg.Concurrency != 32 {
 		t.Errorf("Concurrency = %d, want 32", cfg.Concurrency)
 	}
+	if cfg.MaxRetries != 4 {
+		t.Errorf("MaxRetries = %d, want 4", cfg.MaxRetries)
+	}
 	if cfg.Timeout != 120*time.Second {
 		t.Errorf("Timeout = %v, want 120s", cfg.Timeout)
+	}
+}
+
+func TestGonkaDefaults(t *testing.T) {
+	clearProviderEnv(t)
+	cfg, err := Load([]string{"book.epub", "--provider", "gonka"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Model != defaultGonkaModel {
+		t.Errorf("Model = %q, want %q", cfg.Model, defaultGonkaModel)
+	}
+	// Smaller batch (output cap) and more retries (transient 429s), but
+	// concurrency stays at the global default — gonka's 429s are network-wide,
+	// not fan-out driven.
+	if cfg.BatchSize != defaultGonkaBatch {
+		t.Errorf("BatchSize = %d, want %d", cfg.BatchSize, defaultGonkaBatch)
+	}
+	if cfg.MaxRetries != defaultGonkaRetries {
+		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, defaultGonkaRetries)
+	}
+	if cfg.Concurrency != 32 {
+		t.Errorf("Concurrency = %d, want 32 (unchanged)", cfg.Concurrency)
+	}
+	if cfg.Timeout != 300*time.Second {
+		t.Errorf("Timeout = %v, want 300s", cfg.Timeout)
+	}
+}
+
+func TestGonkaExplicitOverrides(t *testing.T) {
+	clearProviderEnv(t)
+	cfg, err := Load([]string{"book.epub", "--provider", "gonka",
+		"--batch-size", "16", "--max-retries", "2"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BatchSize != 16 {
+		t.Errorf("flag --batch-size lost: got %d, want 16", cfg.BatchSize)
+	}
+	if cfg.MaxRetries != 2 {
+		t.Errorf("flag --max-retries lost: got %d, want 2", cfg.MaxRetries)
 	}
 }
 

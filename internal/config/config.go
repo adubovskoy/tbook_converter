@@ -288,6 +288,7 @@ func Load(args []string) (*Config, error) {
 	cfg.AlignModeExplicit = os.Getenv("ALIGN_MODE") != ""
 	concurrencySet := os.Getenv("CONCURRENCY") != ""
 	batchSet := os.Getenv("BATCH_SIZE") != ""
+	retriesSet := os.Getenv("MAX_RETRIES") != ""
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "align-mode":
@@ -296,6 +297,8 @@ func Load(args []string) (*Config, error) {
 			concurrencySet = true
 		case "batch-size":
 			batchSet = true
+		case "max-retries":
+			retriesSet = true
 		}
 	})
 	if cfg.JudgeScope != JudgeScopeAll && cfg.JudgeScope != JudgeScopeFlagged {
@@ -343,6 +346,19 @@ func Load(args []string) (*Config, error) {
 	}
 	if local && !batchSet {
 		cfg.BatchSize = defaultLocalBatch
+	}
+	// Gonka's decentralized hosts cap output at 16384 tokens per response
+	// (reported by /models), and the global batch of 16 overflows that on
+	// verbose targets (German, Spanish): whole batches come back
+	// finish_reason=length and those sentences never fill. Halving the batch
+	// keeps a request's output under the cap. And a saturated network 429s even
+	// single requests, so a full book needs more retry headroom than the
+	// metered API's 4 to ride out transient rejections. Explicit flag/env wins.
+	if cfg.Provider == ProviderGonka && !batchSet {
+		cfg.BatchSize = defaultGonkaBatch
+	}
+	if cfg.Provider == ProviderGonka && !retriesSet {
+		cfg.MaxRetries = defaultGonkaRetries
 	}
 	// OpenRouter ids carry a vendor prefix ("google/…"); Claude model ids never
 	// do. Under the claude provider, drop such leftovers from .env rather than
@@ -436,10 +452,15 @@ const (
 // defaultLocalConcurrency and defaultLocalBatch replace the global defaults
 // for the local backends (ollama, llamacpp) when no flag/env sets them — a
 // local server serializes past its parallel-slot count, and small local
-// models drop most of a large batch (see Load).
+// models drop most of a large batch (see Load). defaultGonkaBatch and
+// defaultGonkaRetries do the same for gonka: its hosts cap output at 16384
+// tokens (B=16 overflows on verbose targets) and its network 429s transiently
+// under load, so a smaller batch and more retries make a book complete.
 const (
 	defaultLocalConcurrency = 2
 	defaultLocalBatch       = 4
+	defaultGonkaBatch       = 8
+	defaultGonkaRetries     = 8
 )
 
 // trimBookExt strips a known book extension (case-insensitive) so the default
