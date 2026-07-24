@@ -37,7 +37,11 @@ A plain run does, in order:
    preserved; front/back matter skipped; sentences tokenized with rune offsets.
 2. **Glossary** (1 extra call) — recurring terms + proper nouns, enforced in
    every batch so names stay consistent. `--no-glossary` skips it (also needed
-   to reuse caches made before glossary became the default).
+   to reuse caches made before glossary became the default). The glossary is
+   written to `<out-base>.glossary.json` next to the output and reused
+   verbatim on every later run — edit it by hand (or run `--only-glossary`
+   first, see below) to control how specific terms/names are rendered before
+   translating.
 3. **Translate** — batches of 16, 32 requests in parallel.
 4. **Align** — free local LaBSE word alignment (`hybrid` mode); the ~4% of
    sentences the quality gate rejects are re-aligned by the LLM. Without the
@@ -100,6 +104,12 @@ Machine integration (for scripts and services driving the converter):
   code (`en-US` → `en`); `null` plus a warning when the book carries none.
   Nothing else is written to stdout; parse failures exit non-zero with
   `error: …` on stderr.
+- `--only-glossary` — build (or load) the book glossary, write it to
+  `<out-base>.glossary.json`, open it in your system's default app for
+  `.json` files, then exit — no translation runs. Edit the `tgt` of any entry
+  (or delete an entry to stop enforcing it) and re-run normally; the edited
+  file is picked up verbatim instead of rebuilding the glossary, so the same
+  edits apply to the real translation.
 - `--progress-file file.ndjson` (env `PROGRESS_FILE`) — during a real
   conversion, append NDJSON progress events (one JSON per line, flushed per
   write, throttled to ≤ ~2 lines/sec per phase, final line of a phase always
@@ -121,7 +131,8 @@ serializes concurrency).
 Content: `--keep-matter`, `--skip-files pat1,pat2`, `--no-images`, `--no-notes`,
 `--skip-citations` (leave bibliographic footnotes untranslated).
 
-Quality: `--no-glossary`, `--no-lexcheck`, `--judge` (semantic verification
+Quality: `--no-glossary`, `--only-glossary` (build/edit the glossary, see
+above, then exit), `--no-lexcheck`, `--judge` (semantic verification
 report, see below), `--judge-scope` (`flagged` default: suspects + a 5%
 calibration sample — seconds per book | `all`), `--judge-model`,
 `--judge-invalidate`, `--escalate-model` (redo flagged sentences with a

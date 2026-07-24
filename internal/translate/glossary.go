@@ -40,7 +40,7 @@ func BuildGlossary(ctx context.Context, c *Client, cacheDir string, sentences []
 
 	var entries []GlossEntry
 	if b, err := os.ReadFile(cachePath); err == nil && json.Unmarshal(b, &entries) == nil {
-		return entries, glossHash(entries), nil
+		return entries, GlossHash(entries), nil
 	}
 
 	step := max(1, len(sentences)/glossarySampleMax)
@@ -79,12 +79,54 @@ func BuildGlossary(ctx context.Context, c *Client, cacheDir string, sentences []
 			_ = os.WriteFile(cachePath, b, 0o644)
 		}
 	}
-	return entries, glossHash(entries), nil
+	return entries, GlossHash(entries), nil
 }
 
-// glossHash is a short stable digest of the glossary content, used as a
+// LoadGlossaryFile reads a user-editable glossary JSON file — the format
+// WriteGlossaryFile produces: an array of {"src","tgt"} entries — trimming
+// and dropping any entry left with an empty src or tgt (e.g. a term the user
+// blanked out to stop enforcing it). Returns an error if path doesn't exist
+// or isn't valid JSON of that shape.
+func LoadGlossaryFile(path string) ([]GlossEntry, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var entries []GlossEntry
+	if err := json.Unmarshal(b, &entries); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	out := entries[:0]
+	for _, e := range entries {
+		e.Src, e.Tgt = strings.TrimSpace(e.Src), strings.TrimSpace(e.Tgt)
+		if e.Src != "" && e.Tgt != "" {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// WriteGlossaryFile writes entries as pretty-printed JSON to path so a user
+// can open and edit them (see --only-glossary) before translation runs.
+func WriteGlossaryFile(path string, entries []GlossEntry) error {
+	if entries == nil {
+		entries = []GlossEntry{}
+	}
+	b, err := jsonx.MarshalIndent(entries, "  ")
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(path, b, 0o644)
+}
+
+// GlossHash is a short stable digest of the glossary content, used as a
 // translation-cache namespace component.
-func glossHash(entries []GlossEntry) string {
+func GlossHash(entries []GlossEntry) string {
 	if len(entries) == 0 {
 		return ""
 	}

@@ -70,6 +70,7 @@ type Config struct {
 
 	// Quality passes.
 	Glossary        bool   // build a book glossary and enforce it during translation (default on; --no-glossary disables)
+	OnlyGlossary    bool   // build/load the glossary, write it to <out-base>.glossary.json and open it for editing, then exit before translating
 	Judge           bool   // run the semantic verification pass after translating
 	JudgeModel      string // model for the judge pass (default: same as Model)
 	JudgeScope      string // "flagged" (default): judge only lexcheck-flagged + low-coverage sentences + a small calibration sample | "all"
@@ -160,6 +161,7 @@ func Load(args []string) (*Config, error) {
 	// whose keys carry no glossary hash). --glossary is kept as an accepted no-op.
 	_ = fs.Bool("glossary", true, "(default; deprecated) build a book glossary and enforce it during translation — on unless --no-glossary")
 	noGlossary := fs.Bool("no-glossary", envBool("NO_GLOSSARY", false), "skip the book glossary (also reuses caches from pre-glossary runs)")
+	onlyGlossary := fs.Bool("only-glossary", false, "build (or load) the book glossary, write it to <out-base>.glossary.json, open it in your default JSON app, then exit — no translation runs; re-run normally afterward to translate using the (optionally edited) glossary")
 	judge := fs.Bool("judge", false, "after translating, run an independent LLM judge over every sentence; write flagged sources to <out>.flagged.json")
 	judgeModel := fs.String("judge-model", envOr("JUDGE_MODEL", ""), "model for the judge pass (default: same as --model; see README before pointing it at a stronger model)")
 	judgeScope := fs.String("judge-scope", envOr("JUDGE_SCOPE", "flagged"), "with --judge: flagged (default: only lexcheck-flagged + low-coverage sentences, plus a 5% calibration sample) | all (every sentence)")
@@ -239,6 +241,7 @@ func Load(args []string) (*Config, error) {
 		NoNotes:         *noNotes,
 		SkipCitations:   *skipCitations,
 		Glossary:        !*noGlossary,
+		OnlyGlossary:    *onlyGlossary,
 		Judge:           *judge,
 		JudgeModel:      *judgeModel,
 		JudgeScope:      strings.ToLower(strings.TrimSpace(*judgeScope)),

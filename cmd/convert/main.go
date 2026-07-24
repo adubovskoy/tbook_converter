@@ -19,6 +19,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -212,13 +214,30 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	cacheModel := cfg.Model
 	var glossary []translate.GlossEntry
 
+	// The glossary is a user-editable JSON file alongside the output .tbook
+	// (--only-glossary writes and opens it for editing before any translation
+	// runs). Once it exists, every later run loads it verbatim — edits
+	// included — instead of rebuilding it from the model.
+	wantGlossary := cfg.Glossary || cfg.OnlyGlossary
+	glossPath := glossaryFilePath(cfg)
+	var glossFileEntries []translate.GlossEntry
+	haveGlossFile := false
+	if wantGlossary {
+		if entries, lerr := translate.LoadGlossaryFile(glossPath); lerr == nil {
+			glossFileEntries, haveGlossFile = entries, true
+		} else if !os.IsNotExist(lerr) {
+			fmt.Printf("Glossary: couldn't read %s (%v) — rebuilding\n", glossPath, lerr)
+		}
+	}
+	needsGlossaryBuild := wantGlossary && !haveGlossFile
+
 	// Only the untranslated work needs the LLM; a fully-cached run assembles
 	// offline (resume / re-assemble) without a key or CLI.
 	countPending := func() int {
 		return translate.CountPending(translatable, cfg.Targets, cfg.CacheDir, cfg.Source, cacheModel, cfg.Force)
 	}
-	needAPI := countPending() > 0 || cfg.Glossary || cfg.Judge
-	if cfg.AlignMode == config.AlignEmb && !cfg.Glossary && !cfg.Judge {
+	needAPI := countPending() > 0 || needsGlossaryBuild || cfg.Judge
+	if cfg.AlignMode == config.AlignEmb && !needsGlossaryBuild && !cfg.Judge {
 		// emb aligns locally: only the translate phase needs the LLM.
 		needAPI = translate.CountPendingTranslate(translatable, cfg.Targets, cfg.CacheDir,
 			cfg.Source, cacheModel, cfg.Force) > 0
@@ -276,15 +295,32 @@ func convert(cfg *config.Config, runStart time.Time) error {
 
 	// Glossary pass: build (or load) the book glossary and namespace the cache
 	// with its hash — translations made under a different glossary never mix.
-	if cfg.Glossary {
+	if wantGlossary {
 		var ghash string
-		glossary, ghash, err = translate.BuildGlossary(ctx, client, cfg.CacheDir, sentences,
-			cfg.Source, cfg.Targets[0], title, author)
-		if err != nil {
-			return fmt.Errorf("glossary: %w", err)
+		if haveGlossFile {
+			glossary = glossFileEntries
+			ghash = translate.GlossHash(glossary)
+			fmt.Printf("Glossary: using %d user-edited term(s) from %s\n", len(glossary), glossPath)
+		} else {
+			glossary, ghash, err = translate.BuildGlossary(ctx, client, cfg.CacheDir, sentences,
+				cfg.Source, cfg.Targets[0], title, author)
+			if err != nil {
+				return fmt.Errorf("glossary: %w", err)
+			}
+			if werr := translate.WriteGlossaryFile(glossPath, glossary); werr != nil {
+				fmt.Printf("Glossary: couldn't write %s (%v) — edits won't be picked up next run\n", glossPath, werr)
+			}
 		}
 		cacheModel = translate.CacheKeyModel(cfg.Model, ghash)
 		fmt.Printf("Glossary: %d enforced terms (cache namespace %s)\n", len(glossary), cacheModel)
+
+		if cfg.OnlyGlossary {
+			fmt.Printf("Edit %s to change how terms are translated, then re-run without --only-glossary to translate.\n", glossPath)
+			if oerr := openInDefaultApp(glossPath); oerr != nil {
+				fmt.Printf("(couldn't open it automatically: %v — open it yourself)\n", oerr)
+			}
+			return nil
+		}
 	}
 
 	if pending := countPending(); pending > 0 {
@@ -615,6 +651,36 @@ func lexDictLoader(cfg *config.Config) func(target string) *lexcheck.Dict {
 		dicts[target] = d
 		return d
 	}
+}
+
+// glossaryFilePath is the user-editable glossary JSON companion to the
+// output .tbook — auto-written on the first --glossary/--only-glossary run,
+// then reused verbatim (edits included) by every later run instead of
+// rebuilding it from the model.
+func glossaryFilePath(cfg *config.Config) string {
+	return strings.TrimSuffix(cfg.Out, filepath.Ext(cfg.Out)) + ".glossary.json"
+}
+
+// openInDefaultApp opens path (the glossary JSON, for the user to edit before
+// translating) without blocking on the app closing. It prefers the VS Code
+// CLI when available — a plain OS "open" can silently no-op (Windows with no
+// .json association registered) or, worse, launch a synchronous "how do you
+// want to open this?" resolution that never returns — so it is only the
+// fallback, not the primary mechanism.
+func openInDefaultApp(path string) error {
+	if codeBin, err := exec.LookPath("code"); err == nil {
+		return exec.Command(codeBin, path).Start()
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
+	case "darwin":
+		cmd = exec.Command("open", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	return cmd.Start()
 }
 
 // mergeTargets returns the existing target list followed by any requested
