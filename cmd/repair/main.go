@@ -1,3 +1,11 @@
+// PRODUCTION NOTE: convert runs this pass itself (`--repair`, default-on for
+// gonka) — see the phaseRepair phase and repairSystemPrompt in
+// internal/translate. This command stays the RESEARCH harness: it keeps the
+// knobs the pipeline deliberately does not expose (strict/--fluent/--bold
+// mandates, --context N neighbouring sentences, --no-gloss-guard, --diff) so an
+// arm can be measured against a frozen baseline cache without touching the
+// production path.
+//
 // Command repair is a research harness for the proofread/repair pass: it runs a
 // second LLM pass over the RAW translations a previous run already cached and
 // writes the result into a DIFFERENT cache dir, under the same raw-translation
