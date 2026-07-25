@@ -1,0 +1,792 @@
+{
+ "a_label": "base",
+ "b_label": "v6",
+ "pairs": {
+  "4": {
+   "expr": "getting across",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "5": {
+   "expr": "chew this over",
+   "kind": "phrasal",
+   "swap": true,
+   "same": true
+  },
+  "6": {
+   "expr": "make up",
+   "kind": "phrasal",
+   "swap": false,
+   "same": true
+  },
+  "7": {
+   "expr": "had the grace to",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "9": {
+   "expr": "news to me",
+   "kind": "idiom",
+   "swap": false,
+   "same": true
+  },
+  "14": {
+   "expr": "shoot ’em up",
+   "kind": "slang",
+   "swap": true,
+   "same": false
+  },
+  "15": {
+   "expr": "on the point of",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "21": {
+   "expr": "the pit of my stomach",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "22": {
+   "expr": "get on",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "23": {
+   "expr": "used mine up",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "24": {
+   "expr": "the light at the end of a very long tunnel",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "25": {
+   "expr": "in the face of adversity",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "26": {
+   "expr": "put itself to bed",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "27": {
+   "expr": "used up",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "28": {
+   "expr": "stubbed out",
+   "kind": "phrasal",
+   "swap": true,
+   "same": true
+  },
+  "31": {
+   "expr": "cast a glance",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "32": {
+   "expr": "caved in",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "33": {
+   "expr": "Taking no chances",
+   "kind": "idiom",
+   "swap": false,
+   "same": true
+  },
+  "34": {
+   "expr": "Fire in the hole",
+   "kind": "fixed",
+   "swap": false,
+   "same": true
+  },
+  "35": {
+   "expr": "the bluff had bought us",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "36": {
+   "expr": "popped up",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "37": {
+   "expr": "hosed her away",
+   "kind": "slang",
+   "swap": true,
+   "same": false
+  },
+  "38": {
+   "expr": "let go of",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "39": {
+   "expr": "No doubt about it",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "40": {
+   "expr": "gritted my teeth",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "41": {
+   "expr": "fool’s gold",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "47": {
+   "expr": "gave a damn about",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "48": {
+   "expr": "set off",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "49": {
+   "expr": "let go",
+   "kind": "phrasal",
+   "swap": true,
+   "same": true
+  },
+  "50": {
+   "expr": "Stick it in neutral",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "51": {
+   "expr": "working out",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "52": {
+   "expr": "work out",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "53": {
+   "expr": "So much for training",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "54": {
+   "expr": "hangs around",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "55": {
+   "expr": "Somewhere along the line",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "56": {
+   "expr": "for all the world like",
+   "kind": "idiom",
+   "swap": true,
+   "same": true
+  },
+  "57": {
+   "expr": "Give them their due",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "58": {
+   "expr": "decked out",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "59": {
+   "expr": "paid your debt to society",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "60": {
+   "expr": "made his living",
+   "kind": "fixed",
+   "swap": false,
+   "same": true
+  },
+  "61": {
+   "expr": "Don’t give up the day job",
+   "kind": "idiom",
+   "swap": true,
+   "same": true
+  },
+  "62": {
+   "expr": "hard pressed",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "63": {
+   "expr": "keep up",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "64": {
+   "expr": "got through",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "65": {
+   "expr": "your reputation precedes you",
+   "kind": "idiom",
+   "swap": true,
+   "same": true
+  },
+  "66": {
+   "expr": "welling up",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "67": {
+   "expr": "Yeah, right",
+   "kind": "slang",
+   "swap": false,
+   "same": false
+  },
+  "68": {
+   "expr": "catch up with you",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "69": {
+   "expr": "live with them",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "70": {
+   "expr": "my fair share of",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "71": {
+   "expr": "ends up",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "72": {
+   "expr": "line of least resistance",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "73": {
+   "expr": "shot through with",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "75": {
+   "expr": "by any other name",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "76": {
+   "expr": "without a blink",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "77": {
+   "expr": "kicking in",
+   "kind": "phrasal",
+   "swap": true,
+   "same": true
+  },
+  "78": {
+   "expr": "wouldn’t touch with a riot prod",
+   "kind": "idiom",
+   "swap": true,
+   "same": true
+  },
+  "79": {
+   "expr": "burst into song",
+   "kind": "fixed",
+   "swap": false,
+   "same": true
+  },
+  "80": {
+   "expr": "all but deserted",
+   "kind": "fixed",
+   "swap": false,
+   "same": true
+  },
+  "81": {
+   "expr": "down the line",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "82": {
+   "expr": "put away",
+   "kind": "phrasal",
+   "swap": false,
+   "same": true
+  },
+  "83": {
+   "expr": "brought up on",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "84": {
+   "expr": "put away",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "85": {
+   "expr": "piss off",
+   "kind": "slang",
+   "swap": false,
+   "same": false
+  },
+  "86": {
+   "expr": "go along with",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "87": {
+   "expr": "Tell you what",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "95": {
+   "expr": "off balance",
+   "kind": "idiom",
+   "swap": false,
+   "same": true
+  },
+  "96": {
+   "expr": "put her back at her ease",
+   "kind": "idiom",
+   "swap": false,
+   "same": true
+  },
+  "97": {
+   "expr": "turned down",
+   "kind": "phrasal",
+   "swap": true,
+   "same": true
+  },
+  "98": {
+   "expr": "screwed up",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "99": {
+   "expr": "made out",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "100": {
+   "expr": "drowned out",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "101": {
+   "expr": "ran into",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "102": {
+   "expr": "shook her off",
+   "kind": "phrasal",
+   "swap": false,
+   "same": true
+  },
+  "103": {
+   "expr": "fending off",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "110": {
+   "expr": "turned out to be",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "111": {
+   "expr": "decked out in",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "112": {
+   "expr": "craned my neck",
+   "kind": "fixed",
+   "swap": false,
+   "same": false
+  },
+  "118": {
+   "expr": "Something the matter",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "119": {
+   "expr": "cracked them up",
+   "kind": "phrasal",
+   "swap": true,
+   "same": true
+  },
+  "120": {
+   "expr": "Suffice it to say",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "121": {
+   "expr": "has to do with",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "122": {
+   "expr": "your own man",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "123": {
+   "expr": "pay off",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "124": {
+   "expr": "to be trifled with",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "125": {
+   "expr": "from the outset",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "126": {
+   "expr": "look forward to",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "127": {
+   "expr": "made out",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "128": {
+   "expr": "shot Ortega a reproachful look",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "132": {
+   "expr": "pissed off with",
+   "kind": "slang",
+   "swap": true,
+   "same": true
+  },
+  "133": {
+   "expr": "Care to",
+   "kind": "fixed",
+   "swap": false,
+   "same": true
+  },
+  "134": {
+   "expr": "gave away",
+   "kind": "phrasal",
+   "swap": false,
+   "same": true
+  },
+  "135": {
+   "expr": "not for show",
+   "kind": "fixed",
+   "swap": false,
+   "same": false
+  },
+  "136": {
+   "expr": "pulled over",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "137": {
+   "expr": "trumped-up",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "138": {
+   "expr": "make their way",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "139": {
+   "expr": "a hard-on",
+   "kind": "slang",
+   "swap": true,
+   "same": false
+  },
+  "141": {
+   "expr": "out of the corner of my eye",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "143": {
+   "expr": "Money wasn’t an object",
+   "kind": "idiom",
+   "swap": false,
+   "same": true
+  },
+  "144": {
+   "expr": "move on",
+   "kind": "phrasal",
+   "swap": true,
+   "same": true
+  },
+  "145": {
+   "expr": "made double time",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "146": {
+   "expr": "make up for",
+   "kind": "phrasal",
+   "swap": true,
+   "same": true
+  },
+  "147": {
+   "expr": "come to that",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "148": {
+   "expr": "cuts a swathe through",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "150": {
+   "expr": "On the other hand",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "151": {
+   "expr": "keeping your temper",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "152": {
+   "expr": "cocked her head",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "153": {
+   "expr": "gathering dust",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "155": {
+   "expr": "the odd cigarette",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "156": {
+   "expr": "bummed from",
+   "kind": "slang",
+   "swap": false,
+   "same": false
+  },
+  "157": {
+   "expr": "break the habit",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "158": {
+   "expr": "on top of everything",
+   "kind": "fixed",
+   "swap": false,
+   "same": true
+  },
+  "159": {
+   "expr": "pitching for",
+   "kind": "slang",
+   "swap": false,
+   "same": false
+  },
+  "160": {
+   "expr": "play down",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "161": {
+   "expr": "long on modesty",
+   "kind": "idiom",
+   "swap": false,
+   "same": true
+  },
+  "162": {
+   "expr": "ticking off",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "163": {
+   "expr": "the shit hit the fan",
+   "kind": "idiom",
+   "swap": false,
+   "same": false
+  },
+  "164": {
+   "expr": "crack combat team",
+   "kind": "fixed",
+   "swap": false,
+   "same": false
+  },
+  "165": {
+   "expr": "jacked-up",
+   "kind": "slang",
+   "swap": false,
+   "same": false
+  },
+  "166": {
+   "expr": "soak up",
+   "kind": "phrasal",
+   "swap": false,
+   "same": false
+  },
+  "167": {
+   "expr": "get by",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "168": {
+   "expr": "broke off",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  },
+  "172": {
+   "expr": "struck me as",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "173": {
+   "expr": "canal dive",
+   "kind": "slang",
+   "swap": false,
+   "same": false
+  },
+  "175": {
+   "expr": "makes for",
+   "kind": "phrasal",
+   "swap": true,
+   "same": true
+  },
+  "176": {
+   "expr": "nice and neat",
+   "kind": "fixed",
+   "swap": true,
+   "same": true
+  },
+  "177": {
+   "expr": "despite myself",
+   "kind": "fixed",
+   "swap": true,
+   "same": false
+  },
+  "182": {
+   "expr": "on ice",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "185": {
+   "expr": "came out in a rush",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "188": {
+   "expr": "hung in the air",
+   "kind": "idiom",
+   "swap": true,
+   "same": false
+  },
+  "189": {
+   "expr": "locked down",
+   "kind": "phrasal",
+   "swap": true,
+   "same": false
+  }
+ }
+}

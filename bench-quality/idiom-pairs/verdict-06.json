@@ -1,0 +1,8 @@
+{
+ "176": {"v": "both-good", "why": "identical, natural чисто и аккуратно"},
+ "177": {"v": "Y", "why": "Y вопреки себе idiomatic; X calque-ish"},
+ "182": {"v": "both-good", "why": "both convey cold storage/reserve naturally"},
+ "185": {"v": "X", "why": "X одним потоком captures rush; Y misses it"},
+ "188": {"v": "both-good", "why": "identical, idiomatic повис в воздухе"},
+ "189": {"v": "X", "why": "X зафиксирую precise; Y получу loses sense"}
+}

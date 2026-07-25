@@ -85,6 +85,14 @@ type Aligner struct {
 type request struct {
 	Src []string `json:"src"`
 	Tgt []string `json:"tgt"`
+
+	// Units (EXPERIMENTAL, research-only) carries known multi-word expression
+	// spans as SOURCE WORD index ranges [start, end) — inclusive start,
+	// exclusive end — into Src. The child glues every word of such a span to
+	// every target word the span already reaches (tools/embalign.py
+	// glue_units), which is itself gated by EMBALIGN_UNIT_GLUE in the child's
+	// environment. Omitted (nil) = today's behaviour, byte for byte.
+	Units [][2]int `json:"units,omitempty"`
 }
 
 type batchRequest struct {
@@ -146,9 +154,15 @@ func Start(opts Options) (*Aligner, error) {
 // Align returns [srcWordIdx, tgtWordIdx] pairs for one sentence pair, given
 // the word strings on both sides.
 func (a *Aligner) Align(srcWords, tgtWords []string) ([][2]int, error) {
+	return a.AlignUnits(srcWords, tgtWords, nil)
+}
+
+// AlignUnits is Align with optional expression spans (EXPERIMENTAL; see
+// request.Units). units == nil is exactly Align.
+func (a *Aligner) AlignUnits(srcWords, tgtWords []string, units [][2]int) ([][2]int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	b, err := json.Marshal(request{Src: srcWords, Tgt: tgtWords})
+	b, err := json.Marshal(request{Src: srcWords, Tgt: tgtWords, Units: units})
 	if err != nil {
 		return nil, err
 	}
@@ -171,14 +185,27 @@ func (a *Aligner) Align(srcWords, tgtWords []string) ([][2]int, error) {
 // request-level (a dead process wraps ErrDead; an old single-pair-only child
 // returns a plain error — callers may fall back to Align).
 func (a *Aligner) AlignBatch(srcs, tgts [][]string) ([][][2]int, error) {
+	return a.AlignBatchUnits(srcs, tgts, nil)
+}
+
+// AlignBatchUnits is AlignBatch with optional per-item expression spans
+// (EXPERIMENTAL; see request.Units). units may be nil (exactly AlignBatch),
+// otherwise it is parallel to srcs; a nil entry means "no spans for this item".
+func (a *Aligner) AlignBatchUnits(srcs, tgts [][]string, units [][][2]int) ([][][2]int, error) {
 	if len(srcs) != len(tgts) {
 		return nil, fmt.Errorf("embalign: %d sources vs %d targets", len(srcs), len(tgts))
+	}
+	if units != nil && len(units) != len(srcs) {
+		return nil, fmt.Errorf("embalign: %d unit lists for %d items", len(units), len(srcs))
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	req := batchRequest{Batch: make([]request, len(srcs))}
 	for i := range srcs {
 		req.Batch[i] = request{Src: srcs[i], Tgt: tgts[i]}
+		if units != nil {
+			req.Batch[i].Units = units[i]
+		}
 	}
 	b, err := json.Marshal(req)
 	if err != nil {

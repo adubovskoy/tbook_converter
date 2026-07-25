@@ -1,0 +1,1360 @@
+[
+ {
+  "src": "“Mr Kovacs, I am three hundred and fifty-seven years old. I have lived through a corporate war, the subsequent collapse of my industrial and trading interests, the real deaths of two of my children, at least three major economic crises, and I am still here. I am not the kind of man to take my own life, and even if I were, I would not have bungled it in this fashion. If it had been my intention to die, you would not be talking to me now. Is that clear?”",
+  "expr": "take my own life",
+  "kind": "fixed",
+  "gloss": "commit suicide",
+  "ch": 5
+ },
+ {
+  "src": "“Last time I looked through that lens was nearly two centuries ago. A lot of the Colony ships were still in flight then. We were still waiting to find out if they’d make it. Waiting for the needlebeams to come back to us. Like lighthouse beacons.”",
+  "expr": "make it",
+  "kind": "idiom",
+  "gloss": "survive / arrive successfully",
+  "ch": 5
+ },
+ {
+  "src": "He was losing me. I brought him back to reality. “Perspective?”",
+  "expr": "losing me",
+  "kind": "idiom",
+  "gloss": "failing to keep my attention; I could no longer follow him",
+  "ch": 5
+ },
+ {
+  "src": "Bancroft turned to make sure his point was getting across.",
+  "expr": "getting across",
+  "kind": "phrasal",
+  "gloss": "being understood, communicated successfully",
+  "ch": 5
+ },
+ {
+  "src": "I went back to my seat to chew this over.",
+  "expr": "chew this over",
+  "kind": "phrasal",
+  "gloss": "think it over carefully",
+  "ch": 5
+ },
+ {
+  "src": "And then you make up some of your own.",
+  "expr": "make up",
+  "kind": "phrasal",
+  "gloss": "invent, create",
+  "ch": 5
+ },
+ {
+  "src": "He had the grace to come back to his seat.",
+  "expr": "had the grace to",
+  "kind": "fixed",
+  "gloss": "was polite/decent enough to",
+  "ch": 5
+ },
+ {
+  "src": "“No, Mr Kovacs. There is nothing amusing about this situation. Someone out there wants me dead, and that’s not a comfortable feeling. But you must understand that for a man in my position enmity and even death threats are part and parcel of everyday existence. People envy me, people hate me. It is the price of success.”",
+  "expr": "part and parcel",
+  "kind": "idiom",
+  "gloss": "an inseparable, integral part",
+  "ch": 5
+ },
+ {
+  "src": "This was news to me.",
+  "expr": "news to me",
+  "kind": "idiom",
+  "gloss": "something I did not know; surprising information",
+  "ch": 5
+ },
+ {
+  "src": "“Perhaps. I don’t make a habit of screening them. Ms Prescott handles that for me.”",
+  "expr": "make a habit of",
+  "kind": "fixed",
+  "gloss": "do regularly, as a routine",
+  "ch": 5
+ },
+ {
+  "src": "“Mr Kovacs, I am an entrepreneur. Opportunities arise, crises present themselves, and I deal with them. Life goes on. I hire managers to deal with that.”",
+  "expr": "Life goes on",
+  "kind": "fixed",
+  "gloss": "things continue as normal despite events",
+  "ch": 5
+ },
+ {
+  "src": "“Of course, the police conducted their own cursory inquiry. Oumou Prescott told them exactly what she had already told me. That nothing out of the ordinary had been received in the last six months. I have enough faith in her not to need to check beyond that. You’ll probably want to look at the files yourself, though.”",
+  "expr": "out of the ordinary",
+  "kind": "idiom",
+  "gloss": "unusual, abnormal",
+  "ch": 5
+ },
+ {
+  "src": "“Probably better if I do that myself. Just let her know I’ll be in touch. And I’ll need to see the re-sleeving facility at PsychaSec.”",
+  "expr": "be in touch",
+  "kind": "idiom",
+  "gloss": "make contact, communicate",
+  "ch": 5
+ },
+ {
+  "src": "That single sweep of charred stucco on Bancroft’s wall looked too elegant for this to be a shoot ’em up carnival.",
+  "expr": "shoot ’em up",
+  "kind": "slang",
+  "gloss": "marked by wild indiscriminate gunplay",
+  "ch": 5
+ },
+ {
+  "src": "He had been on the point of reaching into his shirt pocket, and now he completed the action, awkwardly.",
+  "expr": "on the point of",
+  "kind": "fixed",
+  "gloss": "just about to",
+  "ch": 5
+ },
+ {
+  "src": "“But for the moment I want to make a soft landing. Sit back and wait for the dust to settle. I think you can appreciate the need for that.”",
+  "expr": "wait for the dust to settle",
+  "kind": "idiom",
+  "gloss": "wait until the situation calms down",
+  "ch": 5
+ },
+ {
+  "src": "“But for the moment I want to make a soft landing. Sit back and wait for the dust to settle. I think you can appreciate the need for that.”",
+  "expr": "Sit back",
+  "kind": "phrasal",
+  "gloss": "relax and take no action for a while",
+  "ch": 5
+ },
+ {
+  "src": "“You’ll bear in mind the terms of our agreement, though. I am paying for a service. I don’t react well to abuse of trust, Mr Kovacs.”",
+  "expr": "bear in mind",
+  "kind": "idiom",
+  "gloss": "remember, keep in consideration",
+  "ch": 5
+ },
+ {
+  "src": "“For what it’s worth, the line the Corps fed you about me is so much shit on a prick. My word’s as good as it ever was.”",
+  "expr": "the line the Corps fed you",
+  "kind": "idiom",
+  "gloss": "the deceptive story they told you ('feed someone a line')",
+  "ch": 5
+ },
+ {
+  "src": "“I take it you intend to interview Miriam now. She really knows more about those last forty-eight hours than I do, so you’ll want to speak to her quite closely.”",
+  "expr": "I take it",
+  "kind": "fixed",
+  "gloss": "I assume, I gather",
+  "ch": 5
+ },
+ {
+  "src": "At the same time a cold hand strummed taut chords in the pit of my stomach and the head of my penis swelled abruptly with blood.",
+  "expr": "the pit of my stomach",
+  "kind": "idiom",
+  "gloss": "the deep hollow of dread/arousal felt in one's stomach",
+  "ch": 5
+ },
+ {
+  "src": "Since the technology imagined in Altered Carbon doesn’t exist yet, I’d better get on and thank these travelling companions while I can, because without their support, I’m pretty certain Altered Carbon itself would not exist either.",
+  "expr": "get on",
+  "kind": "phrasal",
+  "gloss": "proceed; get moving with it",
+  "ch": 1
+ },
+ {
+  "src": "Morgan for enthusiasm from before she could speak, to Gavin Burgess for friendship when often neither of us were in any condition to speak, to Alan Young for depths of unconditional commitment there isn’t any way to speak, and to Virginia Cottinelli for giving me her twenties when I’d almost used mine up.",
+  "expr": "used mine up",
+  "kind": "phrasal",
+  "gloss": "spent/exhausted mine completely",
+  "ch": 1
+ },
+ {
+  "src": "Then, the light at the end of a very long tunnel, thanks to my agent Carolyn Whitaker for considering drafts of Altered Carbon not once, but twice, and to Simon Spanton at Gollancz for being the man to finally make it happen.",
+  "expr": "the light at the end of a very long tunnel",
+  "kind": "idiom",
+  "gloss": "hope of relief after long hardship",
+  "ch": 1
+ },
+ {
+  "src": "in the face of adversity",
+  "expr": "in the face of adversity",
+  "kind": "fixed",
+  "gloss": "when confronted with hardship",
+  "ch": 1
+ },
+ {
+  "src": "Millsport had long since put itself to bed, but out in the Reach currents were still snagging on the shoals, and the sound came ashore to prowl the empty streets.",
+  "expr": "put itself to bed",
+  "kind": "idiom",
+  "gloss": "settled down for the night; gone quiet",
+  "ch": 2
+ },
+ {
+  "src": "Sarah had used up a lot of green on the security guards at Gemini Biosys the previous night.",
+  "expr": "used up",
+  "kind": "phrasal",
+  "gloss": "exhausted the supply of",
+  "ch": 2
+ },
+ {
+  "src": "I stubbed out the cigarette, mildly unimpressed with myself, and went through to the bedroom.",
+  "expr": "stubbed out",
+  "kind": "phrasal",
+  "gloss": "extinguished (a cigarette) by crushing",
+  "ch": 2
+ },
+ {
+  "src": "“Don’t give me that shit. Tell me what you’re looking at.”",
+  "expr": "Don’t give me that shit",
+  "kind": "slang",
+  "gloss": "stop the insincere/evasive talk",
+  "ch": 2
+ },
+ {
+  "src": "“Black. I trust these scumbags about as far as a clingfilm condom.”",
+  "expr": "I trust these scumbags about as far as a clingfilm condom",
+  "kind": "idiom",
+  "gloss": "I don't trust them at all (riff on 'trust as far as I can throw them')",
+  "ch": 2
+ },
+ {
+  "src": "In the kitchen, I loaded up the shard pistol, cast a glance at my own weapon and left it lying there.",
+  "expr": "cast a glance",
+  "kind": "fixed",
+  "gloss": "glanced quickly",
+  "ch": 2
+ },
+ {
+  "src": "She put up one hand and took it out of the air just as the whole of the bedroom wall caved in in thunder.",
+  "expr": "caved in",
+  "kind": "phrasal",
+  "gloss": "collapsed inward",
+  "ch": 2
+ },
+ {
+  "src": "Taking no chances this time.",
+  "expr": "Taking no chances",
+  "kind": "idiom",
+  "gloss": "being maximally cautious",
+  "ch": 2
+ },
+ {
+  "src": "“Fire in the hole.”",
+  "expr": "Fire in the hole",
+  "kind": "fixed",
+  "gloss": "warning cry: explosion imminent",
+  "ch": 2
+ },
+ {
+  "src": "She heard the shout and in the seconds the bluff had bought us she popped up again, shard gun outflung.",
+  "expr": "the bluff had bought us",
+  "kind": "idiom",
+  "gloss": "the deception had gained us (a few seconds)",
+  "ch": 2
+ },
+ {
+  "src": "She heard the shout and in the seconds the bluff had bought us she popped up again, shard gun outflung.",
+  "expr": "popped up",
+  "kind": "phrasal",
+  "gloss": "rose/appeared suddenly",
+  "ch": 2
+ },
+ {
+  "src": "Sarah was turning her aim on the figures beyond the wall when the second commando of the night appeared braced in the kitchen doorway and hosed her away with his assault rifle.",
+  "expr": "hosed her away",
+  "kind": "slang",
+  "gloss": "cut her down with a spray of automatic gunfire",
+  "ch": 2
+ },
+ {
+  "src": "For some reason the rage puddled abruptly out of me. I let go of the commando’s head almost gently and was lifting one puzzled hand to the pain of the splinters in my cheek when I realised I had been shot, and that the bullet must have torn all the way through my chest and into the table leg.",
+  "expr": "let go of",
+  "kind": "phrasal",
+  "gloss": "released my grip on",
+  "ch": 2
+ },
+ {
+  "src": "No doubt about it.",
+  "expr": "No doubt about it",
+  "kind": "fixed",
+  "gloss": "it was absolutely certain",
+  "ch": 2
+ },
+ {
+  "src": "I gritted my teeth, pressed my fingers harder into the hole in my chest and staggered upright.",
+  "expr": "gritted my teeth",
+  "kind": "fixed",
+  "gloss": "clenched my teeth; steeled myself against pain",
+  "ch": 2
+ },
+ {
+  "src": "The Smith & Wesson gleamed like fool’s gold on the scarred wood.",
+  "expr": "fool’s gold",
+  "kind": "fixed",
+  "gloss": "pyrite; something deceptively attractive and worthless",
+  "ch": 2
+ },
+ {
+  "src": "In the Envoy Corps they teach you to let go before storage. Stick it in neutral and float. It’s the first lesson and the trainers drill it into you from day one. Hard-eyed Virginia Vidaura, dancer’s body poised inside the shapeless Corps coveralls as she paced in front of us in the induction room. Don’t worry about anything, she said, and you’ll be ready for it. A decade later, I met her again, in a holding pen at the New Kanagawa justice facility. She was going down for eighty to a century; excessively armed robbery and organic damage. The last thing she said to me when they walked her out of the cell was: “Don’t worry kid, they’ll store it.”",
+  "expr": "let go",
+  "kind": "phrasal",
+  "gloss": "release your mental hold; relax completely",
+  "ch": 3
+ },
+ {
+  "src": "In the Envoy Corps they teach you to let go before storage. Stick it in neutral and float. It’s the first lesson and the trainers drill it into you from day one. Hard-eyed Virginia Vidaura, dancer’s body poised inside the shapeless Corps coveralls as she paced in front of us in the induction room. Don’t worry about anything, she said, and you’ll be ready for it. A decade later, I met her again, in a holding pen at the New Kanagawa justice facility. She was going down for eighty to a century; excessively armed robbery and organic damage. The last thing she said to me when they walked her out of the cell was: “Don’t worry kid, they’ll store it.”",
+  "expr": "Stick it in neutral",
+  "kind": "idiom",
+  "gloss": "disengage your mind; stop caring (gear-shift metaphor)",
+  "ch": 3
+ },
+ {
+  "src": "In the Envoy Corps they teach you to let go before storage. Stick it in neutral and float. It’s the first lesson and the trainers drill it into you from day one. Hard-eyed Virginia Vidaura, dancer’s body poised inside the shapeless Corps coveralls as she paced in front of us in the induction room. Don’t worry about anything, she said, and you’ll be ready for it. A decade later, I met her again, in a holding pen at the New Kanagawa justice facility. She was going down for eighty to a century; excessively armed robbery and organic damage. The last thing she said to me when they walked her out of the cell was: “Don’t worry kid, they’ll store it.”",
+  "expr": "drill it into you",
+  "kind": "idiom",
+  "gloss": "teach it to you by relentless repetition",
+  "ch": 3
+ },
+ {
+  "src": "In the Envoy Corps they teach you to let go before storage. Stick it in neutral and float. It’s the first lesson and the trainers drill it into you from day one. Hard-eyed Virginia Vidaura, dancer’s body poised inside the shapeless Corps coveralls as she paced in front of us in the induction room. Don’t worry about anything, she said, and you’ll be ready for it. A decade later, I met her again, in a holding pen at the New Kanagawa justice facility. She was going down for eighty to a century; excessively armed robbery and organic damage. The last thing she said to me when they walked her out of the cell was: “Don’t worry kid, they’ll store it.”",
+  "expr": "from day one",
+  "kind": "fixed",
+  "gloss": "from the very beginning",
+  "ch": 3
+ },
+ {
+  "src": "In the Envoy Corps they teach you to let go before storage. Stick it in neutral and float. It’s the first lesson and the trainers drill it into you from day one. Hard-eyed Virginia Vidaura, dancer’s body poised inside the shapeless Corps coveralls as she paced in front of us in the induction room. Don’t worry about anything, she said, and you’ll be ready for it. A decade later, I met her again, in a holding pen at the New Kanagawa justice facility. She was going down for eighty to a century; excessively armed robbery and organic damage. The last thing she said to me when they walked her out of the cell was: “Don’t worry kid, they’ll store it.”",
+  "expr": "going down for",
+  "kind": "slang",
+  "gloss": "being sent to prison for (a sentence of)",
+  "ch": 3
+ },
+ {
+  "src": "Then she bent her head to light a cigarette, drew the smoke hard into lungs she no longer gave a damn about and set off down the corridor as if to a tedious briefing.",
+  "expr": "gave a damn about",
+  "kind": "idiom",
+  "gloss": "cared about",
+  "ch": 3
+ },
+ {
+  "src": "Then she bent her head to light a cigarette, drew the smoke hard into lungs she no longer gave a damn about and set off down the corridor as if to a tedious briefing.",
+  "expr": "set off",
+  "kind": "phrasal",
+  "gloss": "started walking; departed",
+  "ch": 3
+ },
+ {
+  "src": "So you let go.",
+  "expr": "let go",
+  "kind": "phrasal",
+  "gloss": "release your mental hold; relax",
+  "ch": 3
+ },
+ {
+  "src": "Stick it in neutral.",
+  "expr": "Stick it in neutral",
+  "kind": "idiom",
+  "gloss": "disengage your mind; go emotionally idle",
+  "ch": 3
+ },
+ {
+  "src": "At about the same time I was working out there were no wounds in my chest, someone wiped a towel roughly across my face and I could see.",
+  "expr": "working out",
+  "kind": "phrasal",
+  "gloss": "figuring out; realizing",
+  "ch": 3
+ },
+ {
+  "src": "For about half a minute I stayed sitting, head down, coughing out the gel and trying to work out why everything weighed so much.",
+  "expr": "work out",
+  "kind": "phrasal",
+  "gloss": "figure out",
+  "ch": 3
+ },
+ {
+  "src": "“So much for training.”",
+  "expr": "So much for training",
+  "kind": "idiom",
+  "gloss": "the training proved useless after all",
+  "ch": 3
+ },
+ {
+  "src": "It was a hard, male voice, the sort that habitually hangs around justice facilities.",
+  "expr": "hangs around",
+  "kind": "phrasal",
+  "gloss": "loiters; is habitually found near",
+  "ch": 3
+ },
+ {
+  "src": "Somewhere along the line, they’d taken Takeshi Kovacs (d.h.), and they’d freighted him.",
+  "expr": "Somewhere along the line",
+  "kind": "idiom",
+  "gloss": "at some point in the process",
+  "ch": 3
+ },
+ {
+  "src": "I was sitting in the opened hatch of a dull metal cylinder, looking for all the world like an ancient aviator who’d forgotten to dress before climbing aboard his biplane.",
+  "expr": "for all the world like",
+  "kind": "idiom",
+  "gloss": "exactly like",
+  "ch": 3
+ },
+ {
+  "src": "Give them their due, on Harlan’s World at least the re-sleeving rooms are decked out in pastel colours and the attendants are pretty.",
+  "expr": "Give them their due",
+  "kind": "idiom",
+  "gloss": "to be fair to them; crediting what they deserve",
+  "ch": 3
+ },
+ {
+  "src": "Give them their due, on Harlan’s World at least the re-sleeving rooms are decked out in pastel colours and the attendants are pretty.",
+  "expr": "decked out",
+  "kind": "phrasal",
+  "gloss": "decorated; fitted out attractively",
+  "ch": 3
+ },
+ {
+  "src": "After all, you’re supposed to have paid your debt to society.",
+  "expr": "paid your debt to society",
+  "kind": "idiom",
+  "gloss": "served your prison sentence",
+  "ch": 3
+ },
+ {
+  "src": "About two metres tall, he looked as if he’d made his living wrestling swamp panthers before the present career opportunity presented itself.",
+  "expr": "made his living",
+  "kind": "fixed",
+  "gloss": "earned his income",
+  "ch": 3
+ },
+ {
+  "src": "“Don’t give up the day job,” I told him soberly.",
+  "expr": "Don’t give up the day job",
+  "kind": "idiom",
+  "gloss": "sarcastic: you're no good at this sideline",
+  "ch": 3
+ },
+ {
+  "src": "She was moving at quite a pace and I was hard pressed to keep up, wrapped as I was in nothing but a plain grey towel and still dripping tank gel.",
+  "expr": "hard pressed",
+  "kind": "fixed",
+  "gloss": "struggling; barely able",
+  "ch": 3
+ },
+ {
+  "src": "She was moving at quite a pace and I was hard pressed to keep up, wrapped as I was in nothing but a plain grey towel and still dripping tank gel.",
+  "expr": "keep up",
+  "kind": "phrasal",
+  "gloss": "match her pace",
+  "ch": 3
+ },
+ {
+  "src": "I wondered how many sleevings she got through in a day.",
+  "expr": "got through",
+  "kind": "phrasal",
+  "gloss": "completed; processed",
+  "ch": 3
+ },
+ {
+  "src": "“Perhaps your reputation precedes you.”",
+  "expr": "your reputation precedes you",
+  "kind": "idiom",
+  "gloss": "people have heard about you before meeting you",
+  "ch": 3
+ },
+ {
+  "src": "She looked at me, and I saw it welling up in her eyes; the mingled fear and wonder and contempt of the failed human reformer.",
+  "expr": "welling up",
+  "kind": "phrasal",
+  "gloss": "surging/rising (of emotion or tears)",
+  "ch": 3
+ },
+ {
+  "src": "“Yeah, right,” I said quietly.",
+  "expr": "Yeah, right",
+  "kind": "slang",
+  "gloss": "sarcastic: I don't believe that",
+  "ch": 3
+ },
+ {
+  "src": "The little twinges and snags catch up with you later on and if you’re wise, you just live with them.",
+  "expr": "catch up with you",
+  "kind": "idiom",
+  "gloss": "eventually take their toll on you",
+  "ch": 3
+ },
+ {
+  "src": "The little twinges and snags catch up with you later on and if you’re wise, you just live with them.",
+  "expr": "live with them",
+  "kind": "phrasal",
+  "gloss": "tolerate/accept them",
+  "ch": 3
+ },
+ {
+  "src": "I’ve worn my fair share of synthetic sleeves; they use them for parole hearings quite often.",
+  "expr": "my fair share of",
+  "kind": "fixed",
+  "gloss": "plenty of; as many as anyone",
+  "ch": 3
+ },
+ {
+  "src": "Everything you eat ends up tasting like curried sawdust.",
+  "expr": "ends up",
+  "kind": "phrasal",
+  "gloss": "finally turns out; results in",
+  "ch": 3
+ },
+ {
+  "src": "It was basically Caucasian, which was a change for me, and the overwhelming impression I got was that if there was a line of least resistance in life, this face had never been along it.",
+  "expr": "line of least resistance",
+  "kind": "idiom",
+  "gloss": "the easiest available course through life",
+  "ch": 3
+ },
+ {
+  "src": "The thick cropped hair was black shot through with grey.",
+  "expr": "shot through with",
+  "kind": "fixed",
+  "gloss": "streaked/permeated with",
+  "ch": 3
+ },
+ {
+  "src": "“You’re a recidivist, Kovacs. I never saw the case for wasting good flesh and blood on people like you.”",
+  "expr": "flesh and blood",
+  "kind": "fixed",
+  "gloss": "a living human body",
+  "ch": 3
+ },
+ {
+  "src": "Bullshit by any other name.",
+  "expr": "by any other name",
+  "kind": "idiom",
+  "gloss": "no matter what you call it, it's still the same",
+  "ch": 3
+ },
+ {
+  "src": "I signed it without a blink.",
+  "expr": "without a blink",
+  "kind": "fixed",
+  "gloss": "without the slightest hesitation",
+  "ch": 3
+ },
+ {
+  "src": "The neurachem was kicking in.",
+  "expr": "kicking in",
+  "kind": "phrasal",
+  "gloss": "starting to take effect",
+  "ch": 3
+ },
+ {
+  "src": "Freighted in to do a job that the local police wouldn’t touch with a riot prod.",
+  "expr": "wouldn’t touch with a riot prod",
+  "kind": "idiom",
+  "gloss": "would avoid entirely (riff on 'wouldn't touch with a bargepole')",
+  "ch": 3
+ },
+ {
+  "src": "I felt so lucky I could have burst into song as I walked out the door.",
+  "expr": "burst into song",
+  "kind": "fixed",
+  "gloss": "suddenly begin singing",
+  "ch": 3
+ },
+ {
+  "src": "The hall outside was huge, and all but deserted.",
+  "expr": "all but deserted",
+  "kind": "fixed",
+  "gloss": "almost completely deserted",
+  "ch": 4
+ },
+ {
+  "src": "Or maybe they were a couple of generations down the line, waiting for relatives who were no more to them now than a vague childhood memory or a family legend.",
+  "expr": "down the line",
+  "kind": "idiom",
+  "gloss": "later; further on in time",
+  "ch": 4
+ },
+ {
+  "src": "I knew one guy in the Corps, Murakami, who was waiting on the release of a great-grandfather put away over a century back.",
+  "expr": "put away",
+  "kind": "phrasal",
+  "gloss": "locked up; imprisoned",
+  "ch": 4
+ },
+ {
+  "src": "He’d been brought up on stories of his great-grandfather in the Kanagawa pool halls.",
+  "expr": "brought up on",
+  "kind": "phrasal",
+  "gloss": "raised (from childhood) on",
+  "ch": 4
+ },
+ {
+  "src": "The guy had been put away before Murakami was even born.",
+  "expr": "put away",
+  "kind": "phrasal",
+  "gloss": "imprisoned",
+  "ch": 4
+ },
+ {
+  "src": "Newly arrived and newly sleeved is the wrong state to be in if you plan to piss off the local militia.",
+  "expr": "piss off",
+  "kind": "slang",
+  "gloss": "anger; antagonize",
+  "ch": 4
+ },
+ {
+  "src": "I made an attempt to look as if I was seriously considering whether or not to go along with them, but they had me and they knew it.",
+  "expr": "go along with",
+  "kind": "phrasal",
+  "gloss": "comply/cooperate with",
+  "ch": 4
+ },
+ {
+  "src": "“Tell you what, I’ll just stop you when you get one wrong.”",
+  "expr": "Tell you what",
+  "kind": "fixed",
+  "gloss": "here's a suggestion",
+  "ch": 4
+ },
+ {
+  "src": "“Cool down, Kovacs. I’m just making conversation here. Yeah, I know Laurens Bancroft sprung you. Matter of fact, I’m here to offer you a lift up to the Bancroft residence.”",
+  "expr": "Cool down",
+  "kind": "phrasal",
+  "gloss": "calm down",
+  "ch": 4
+ },
+ {
+  "src": "“Cool down, Kovacs. I’m just making conversation here. Yeah, I know Laurens Bancroft sprung you. Matter of fact, I’m here to offer you a lift up to the Bancroft residence.”",
+  "expr": "making conversation",
+  "kind": "fixed",
+  "gloss": "chatting idly/politely, without deeper motive",
+  "ch": 4
+ },
+ {
+  "src": "“Cool down, Kovacs. I’m just making conversation here. Yeah, I know Laurens Bancroft sprung you. Matter of fact, I’m here to offer you a lift up to the Bancroft residence.”",
+  "expr": "sprung you",
+  "kind": "slang",
+  "gloss": "got you released from custody",
+  "ch": 4
+ },
+ {
+  "src": "“Cool down, Kovacs. I’m just making conversation here. Yeah, I know Laurens Bancroft sprung you. Matter of fact, I’m here to offer you a lift up to the Bancroft residence.”",
+  "expr": "Matter of fact",
+  "kind": "fixed",
+  "gloss": "in fact; as it happens",
+  "ch": 4
+ },
+ {
+  "src": "“Cool down, Kovacs. I’m just making conversation here. Yeah, I know Laurens Bancroft sprung you. Matter of fact, I’m here to offer you a lift up to the Bancroft residence.”",
+  "expr": "offer you a lift",
+  "kind": "fixed",
+  "gloss": "offer you a ride in a vehicle",
+  "ch": 4
+ },
+ {
+  "src": "“No, it’s just the facts. Open-and-shut suicide.”",
+  "expr": "Open-and-shut",
+  "kind": "fixed",
+  "gloss": "straightforward; instantly decidable (case)",
+  "ch": 4
+ },
+ {
+  "src": "“Well, that’s his prerogative. I guess it might be difficult for a man like that to believe he’d blow his own head clean off.”",
+  "expr": "clean off",
+  "kind": "fixed",
+  "gloss": "completely off (intensifying adverb)",
+  "ch": 4
+ },
+ {
+  "src": "Another pause, but this time Kristin Ortega seemed to be off balance for the first time in our brief acquaintance.",
+  "expr": "off balance",
+  "kind": "idiom",
+  "gloss": "unsettled; disconcerted",
+  "ch": 4
+ },
+ {
+  "src": "Fascinated at why someone would lie so ineptly to a total stranger, I tried to put her back at her ease.",
+  "expr": "put her back at her ease",
+  "kind": "idiom",
+  "gloss": "make her feel comfortable again",
+  "ch": 4
+ },
+ {
+  "src": "“I’ve never turned down a free ride yet.”",
+  "expr": "turned down",
+  "kind": "phrasal",
+  "gloss": "refused; declined",
+  "ch": 4
+ },
+ {
+  "src": "I screwed up my new eyes against the glare and made out angular buildings behind real wire fences on the other side of a badly-kept landing lot.",
+  "expr": "screwed up",
+  "kind": "phrasal",
+  "gloss": "squinted; scrunched (my eyes)",
+  "ch": 4
+ },
+ {
+  "src": "I screwed up my new eyes against the glare and made out angular buildings behind real wire fences on the other side of a badly-kept landing lot.",
+  "expr": "made out",
+  "kind": "phrasal",
+  "gloss": "discerned; managed to see",
+  "ch": 4
+ },
+ {
+  "src": "H. Cheers drowned out the speaker.",
+  "expr": "drowned out",
+  "kind": "phrasal",
+  "gloss": "overwhelmed the sound of",
+  "ch": 4
+ },
+ {
+  "src": "“I’ve been to Latimer, I never ran into anything like this.”",
+  "expr": "ran into",
+  "kind": "phrasal",
+  "gloss": "encountered by chance",
+  "ch": 4
+ },
+ {
+  "src": "I shook her off politely but equally firmly.",
+  "expr": "shook her off",
+  "kind": "phrasal",
+  "gloss": "freed myself from her hold",
+  "ch": 4
+ },
+ {
+  "src": "“I think we both have better things to do, yes,” she said, tight lipped, looking back to where her colleagues were engaged in fending off leaflets of their own.",
+  "expr": "fending off",
+  "kind": "phrasal",
+  "gloss": "warding off; repelling",
+  "ch": 4
+ },
+ {
+  "src": "“That’s just the sleeve. I think it had some neurachem conditioning way back when, and she tripped it. You know, most people lie down for a few hours after downloading. I’m a little on edge.”",
+  "expr": "way back when",
+  "kind": "idiom",
+  "gloss": "a long time ago",
+  "ch": 4
+ },
+ {
+  "src": "“That’s just the sleeve. I think it had some neurachem conditioning way back when, and she tripped it. You know, most people lie down for a few hours after downloading. I’m a little on edge.”",
+  "expr": "on edge",
+  "kind": "idiom",
+  "gloss": "nervous; tense",
+  "ch": 4
+ },
+ {
+  "src": "“Bay City public prosecutor’s office want to subpoena a Catholic who’s in storage. Pivotal witness. The Vatican say she’s already dead and in the hands of God. They’re calling it blasphemy.”",
+  "expr": "in the hands of God",
+  "kind": "idiom",
+  "gloss": "under God's care and control",
+  "ch": 4
+ },
+ {
+  "src": "“Kovacs, I hate these goddamn freaks. They’ve been grinding us down for the best part of two and a half thousand years. They’ve been responsible for more misery than any other organisation in history. You know they won’t even let their adherents practise birth control, for Christ’s sake, and they’ve stood against every significant medical advance of the last five centuries. Practically the only thing you can say in their favour is that this d.h.f. thing has stopped them from spreading with the rest of humanity.”",
+  "expr": "grinding us down",
+  "kind": "phrasal",
+  "gloss": "wearing us down; oppressing us",
+  "ch": 4
+ },
+ {
+  "src": "“Kovacs, I hate these goddamn freaks. They’ve been grinding us down for the best part of two and a half thousand years. They’ve been responsible for more misery than any other organisation in history. You know they won’t even let their adherents practise birth control, for Christ’s sake, and they’ve stood against every significant medical advance of the last five centuries. Practically the only thing you can say in their favour is that this d.h.f. thing has stopped them from spreading with the rest of humanity.”",
+  "expr": "the best part of",
+  "kind": "fixed",
+  "gloss": "nearly all of; almost",
+  "ch": 4
+ },
+ {
+  "src": "“Kovacs, I hate these goddamn freaks. They’ve been grinding us down for the best part of two and a half thousand years. They’ve been responsible for more misery than any other organisation in history. You know they won’t even let their adherents practise birth control, for Christ’s sake, and they’ve stood against every significant medical advance of the last five centuries. Practically the only thing you can say in their favour is that this d.h.f. thing has stopped them from spreading with the rest of humanity.”",
+  "expr": "for Christ’s sake",
+  "kind": "fixed",
+  "gloss": "exclamation of exasperation",
+  "ch": 4
+ },
+ {
+  "src": "My lift turned out to be a battered but undeniably rakish-looking Lockheed-Mitoma transport decked out in what were presumably police colours.",
+  "expr": "turned out to be",
+  "kind": "phrasal",
+  "gloss": "proved to be; was revealed as",
+  "ch": 4
+ },
+ {
+  "src": "My lift turned out to be a battered but undeniably rakish-looking Lockheed-Mitoma transport decked out in what were presumably police colours.",
+  "expr": "decked out in",
+  "kind": "phrasal",
+  "gloss": "painted/adorned in",
+  "ch": 4
+ },
+ {
+  "src": "As we spiralled up, I craned my neck to keep the crowd below in sight.",
+  "expr": "craned my neck",
+  "kind": "fixed",
+  "gloss": "stretched my neck to see",
+  "ch": 4
+ },
+ {
+  "src": "“Well, if these guys don’t practise birth control, there’s got to be an awful lot of them, right. And Earth isn’t exactly a hive of activity these days, so… Why aren’t they running things?”",
+  "expr": "a hive of activity",
+  "kind": "idiom",
+  "gloss": "a place bustling with activity",
+  "ch": 4
+ },
+ {
+  "src": "“Well, if these guys don’t practise birth control, there’s got to be an awful lot of them, right. And Earth isn’t exactly a hive of activity these days, so… Why aren’t they running things?”",
+  "expr": "running things",
+  "kind": "idiom",
+  "gloss": "in charge; controlling affairs",
+  "ch": 4
+ },
+ {
+  "src": "“Ten years or three months, it’s all the same to them. A death sentence every time. They never come off stack. It’s cute, huh?”",
+  "expr": "it’s all the same to them",
+  "kind": "fixed",
+  "gloss": "it makes no difference to them",
+  "ch": 4
+ },
+ {
+  "src": "“Sold off, broken down for transplants. Depends on the family.”",
+  "expr": "Sold off",
+  "kind": "phrasal",
+  "gloss": "disposed of by sale",
+  "ch": 4
+ },
+ {
+  "src": "“Sold off, broken down for transplants. Depends on the family.”",
+  "expr": "broken down",
+  "kind": "phrasal",
+  "gloss": "disassembled (into parts)",
+  "ch": 4
+ },
+ {
+  "src": "“Something the matter, Kovacs?”",
+  "expr": "Something the matter",
+  "kind": "fixed",
+  "gloss": "is something wrong",
+  "ch": 4
+ },
+ {
+  "src": "That cracked them up.",
+  "expr": "cracked them up",
+  "kind": "phrasal",
+  "gloss": "made them burst out laughing",
+  "ch": 4
+ },
+ {
+  "src": "Suffice it to say that I am a rich and powerful man here on Earth, and have made many enemies as a result.",
+  "expr": "Suffice it to say",
+  "kind": "fixed",
+  "gloss": "it is enough to say",
+  "ch": 4
+ },
+ {
+  "src": "Clearly you will wonder what all this has to do with you and why you have been dragged a hundred and eighty-six light years out of storage to deal with such a local matter.",
+  "expr": "has to do with",
+  "kind": "fixed",
+  "gloss": "concerns; relates to",
+  "ch": 4
+ },
+ {
+  "src": "It is my understanding that you are your own man.",
+  "expr": "your own man",
+  "kind": "idiom",
+  "gloss": "independent; beholden to no one",
+  "ch": 4
+ },
+ {
+  "src": "Alternatively, I undertake to pay off the balance of the mortgage on your current sleeve here on Earth and you may become a naturalised UN citizen.",
+  "expr": "pay off",
+  "kind": "phrasal",
+  "gloss": "repay in full",
+  "ch": 4
+ },
+ {
+  "src": "I believe these terms to be generous but I should add that I am not a man to be trifled with.",
+  "expr": "to be trifled with",
+  "kind": "fixed",
+  "gloss": "to be treated lightly or crossed",
+  "ch": 4
+ },
+ {
+  "src": "Should you choose not to accept my contract from the outset, you will also be returned to storage immediately, though I cannot undertake to refreight you to Harlan’s World in this case.",
+  "expr": "from the outset",
+  "kind": "fixed",
+  "gloss": "from the very beginning",
+  "ch": 4
+ },
+ {
+  "src": "I look forward to meeting you at Suntouch House.",
+  "expr": "look forward to",
+  "kind": "phrasal",
+  "gloss": "anticipate with pleasure",
+  "ch": 4
+ },
+ {
+  "src": "As we came lower I made out the discreet haze of a power fence along one border of the grounds.",
+  "expr": "made out",
+  "kind": "phrasal",
+  "gloss": "discerned; managed to see",
+  "ch": 5
+ },
+ {
+  "src": "I shot Ortega a reproachful look which she ignored.",
+  "expr": "shot Ortega a reproachful look",
+  "kind": "fixed",
+  "gloss": "gave her a swift reproachful glance",
+  "ch": 5
+ },
+ {
+  "src": "“What was that all about? You guys pissed off with Bancroft just because he doesn’t buy his own suicide?”",
+  "expr": "What was that all about",
+  "kind": "fixed",
+  "gloss": "what did that mean; why did that happen",
+  "ch": 5
+ },
+ {
+  "src": "“What was that all about? You guys pissed off with Bancroft just because he doesn’t buy his own suicide?”",
+  "expr": "pissed off with",
+  "kind": "slang",
+  "gloss": "angry at",
+  "ch": 5
+ },
+ {
+  "src": "“What was that all about? You guys pissed off with Bancroft just because he doesn’t buy his own suicide?”",
+  "expr": "doesn’t buy",
+  "kind": "slang",
+  "gloss": "doesn't believe/accept",
+  "ch": 5
+ },
+ {
+  "src": "“No, that’s not why we’re pissed off with Mr Bancroft.”",
+  "expr": "pissed off with",
+  "kind": "slang",
+  "gloss": "angry at",
+  "ch": 5
+ },
+ {
+  "src": "“Care to tell me why?”",
+  "expr": "Care to",
+  "kind": "fixed",
+  "gloss": "would you be willing to",
+  "ch": 5
+ },
+ {
+  "src": "Golden hair brushed her shoulders as she moved and the shout gave away a glimpse of milk white teeth.",
+  "expr": "gave away",
+  "kind": "phrasal",
+  "gloss": "revealed; let show",
+  "ch": 5
+ },
+ {
+  "src": "She wore sweat bands at forehead and wrists and from the dew on her brow they were not for show.",
+  "expr": "not for show",
+  "kind": "fixed",
+  "gloss": "not merely decorative; genuinely used",
+  "ch": 5
+ },
+ {
+  "src": "“I assume it was you who arranged for our chauffeur to be pulled over on some trumped-up emissions charge.”",
+  "expr": "pulled over",
+  "kind": "phrasal",
+  "gloss": "stopped (a vehicle) by the authorities",
+  "ch": 5
+ },
+ {
+  "src": "“I assume it was you who arranged for our chauffeur to be pulled over on some trumped-up emissions charge.”",
+  "expr": "trumped-up",
+  "kind": "fixed",
+  "gloss": "fabricated; falsely concocted (charge)",
+  "ch": 5
+ },
+ {
+  "src": "They had been standing under the eaves watching since we arrived, but now they ambled out of the shade and began to make their way in our direction.",
+  "expr": "make their way",
+  "kind": "fixed",
+  "gloss": "proceed; travel",
+  "ch": 5
+ },
+ {
+  "src": "I became abruptly aware that I was swinging a hard-on like a filled fire hose.",
+  "expr": "a hard-on",
+  "kind": "slang",
+  "gloss": "an erection",
+  "ch": 5
+ },
+ {
+  "src": "“I’m sorry, Mr Kovacs. I’ve forgotten my manners. The police, as you see, have not been sympathetic. It’s been very upsetting, and we all still feel a little on edge. If you can imagine—”",
+  "expr": "on edge",
+  "kind": "idiom",
+  "gloss": "nervous; tense",
+  "ch": 5
+ },
+ {
+  "src": "Her face underwent a change that I caught out of the corner of my eye.",
+  "expr": "out of the corner of my eye",
+  "kind": "idiom",
+  "gloss": "with peripheral vision; without looking directly",
+  "ch": 5
+ },
+ {
+  "src": "“On Mars they grow to be a hundred metres tall, sometimes as wide as this house at the root. You can hear them singing for kilometres. The perfume carries as well. From the erosion patterns, we think that most of them are at least ten thousand years old. This one might only have been around since the founding of the Roman empire.”",
+  "expr": "been around",
+  "kind": "phrasal",
+  "gloss": "existed; been in existence",
+  "ch": 5
+ },
+ {
+  "src": "“Money wasn’t an object, Mr Kovacs.”",
+  "expr": "Money wasn’t an object",
+  "kind": "idiom",
+  "gloss": "cost was no obstacle/concern",
+  "ch": 5
+ },
+ {
+  "src": "Time to move on.",
+  "expr": "move on",
+  "kind": "phrasal",
+  "gloss": "proceed to the next thing",
+  "ch": 5
+ },
+ {
+  "src": "We made double time down the left-hand corridor, perhaps to make up for our unscheduled stop.",
+  "expr": "made double time",
+  "kind": "fixed",
+  "gloss": "moved at double speed; hurried",
+  "ch": 5
+ },
+ {
+  "src": "We made double time down the left-hand corridor, perhaps to make up for our unscheduled stop.",
+  "expr": "make up for",
+  "kind": "phrasal",
+  "gloss": "compensate for",
+  "ch": 5
+ },
+ {
+  "src": "He must have heard us come in; come to that, he must have heard the police cruiser arrive and known what it signified, but still he stayed where he was, staring out to sea.",
+  "expr": "come to that",
+  "kind": "fixed",
+  "gloss": "for that matter",
+  "ch": 5
+ },
+ {
+  "src": "There’s a favourite experia star on Harlan’s World called Alain Marriott, best known for his portrayal of a virile young Quellist philosopher who cuts a swathe through the brutal tyranny of the early Settlement years.",
+  "expr": "cuts a swathe through",
+  "kind": "idiom",
+  "gloss": "sweeps dramatically/destructively through",
+  "ch": 5
+ },
+ {
+  "src": "“Don’t worry about it, Miriam. They’re just sniffing around. I warned them I was going to do this, and they ignored me. Well, now Mr Kovacs is here, and they’re finally taking me seriously.”",
+  "expr": "sniffing around",
+  "kind": "phrasal",
+  "gloss": "snooping; prying",
+  "ch": 5
+ },
+ {
+  "src": "On the other hand, no one at Suntouch House had mispronounced my name yet, and I didn’t really have a choice.",
+  "expr": "On the other hand",
+  "kind": "idiom",
+  "gloss": "considering the opposite side",
+  "ch": 5
+ },
+ {
+  "src": "That had to be worth keeping your temper for.",
+  "expr": "keeping your temper",
+  "kind": "fixed",
+  "gloss": "staying calm; not getting angry",
+  "ch": 5
+ },
+ {
+  "src": "She cocked her head at an angle, and looked from me to Bancroft and back.",
+  "expr": "cocked her head",
+  "kind": "fixed",
+  "gloss": "tilted her head (quizzically)",
+  "ch": 5
+ },
+ {
+  "src": "Behind them, an antique astronomical telescope stood levelled at the horizon, gathering dust.",
+  "expr": "gathering dust",
+  "kind": "idiom",
+  "gloss": "sitting unused",
+  "ch": 5
+ },
+ {
+  "src": "“Would you care for a drink? Something alcoholic?”",
+  "expr": "care for",
+  "kind": "fixed",
+  "gloss": "want; like (polite offer)",
+  "ch": 5
+ },
+ {
+  "src": "Apart from the odd cigarette bummed from Sarah, I’d been quit for the last two sleeves and I didn’t want to have to break the habit all over again.",
+  "expr": "the odd cigarette",
+  "kind": "fixed",
+  "gloss": "an occasional cigarette",
+  "ch": 5
+ },
+ {
+  "src": "Apart from the odd cigarette bummed from Sarah, I’d been quit for the last two sleeves and I didn’t want to have to break the habit all over again.",
+  "expr": "bummed from",
+  "kind": "slang",
+  "gloss": "scrounged/cadged from",
+  "ch": 5
+ },
+ {
+  "src": "Apart from the odd cigarette bummed from Sarah, I’d been quit for the last two sleeves and I didn’t want to have to break the habit all over again.",
+  "expr": "break the habit",
+  "kind": "idiom",
+  "gloss": "quit the addiction",
+  "ch": 5
+ },
+ {
+  "src": "Alcohol on top of everything would finish me.",
+  "expr": "on top of everything",
+  "kind": "fixed",
+  "gloss": "in addition to everything else",
+  "ch": 5
+ },
+ {
+  "src": "It felt funny, pitching for a client who was already in.",
+  "expr": "pitching for",
+  "kind": "slang",
+  "gloss": "making a sales pitch to win over",
+  "ch": 5
+ },
+ {
+  "src": "Felt funny to play down what I could do, as well.",
+  "expr": "play down",
+  "kind": "phrasal",
+  "gloss": "minimize the importance of",
+  "ch": 5
+ },
+ {
+  "src": "The criminal community isn’t long on modesty, and what you do to get serious backing is inflate whatever reputation you may already have.",
+  "expr": "long on modesty",
+  "kind": "idiom",
+  "gloss": "well supplied with modesty (here negated: short of it)",
+  "ch": 5
+ },
+ {
+  "src": "Long polished conference tables and Virginia Vidaura ticking off the capabilities of her team.",
+  "expr": "ticking off",
+  "kind": "phrasal",
+  "gloss": "enumerating one by one",
+  "ch": 5
+ },
+ {
+  "src": "Even if you launched a troop carrier the moment the shit hit the fan, the marines would be arriving just in time to quiz the grandchildren of whoever won.",
+  "expr": "the shit hit the fan",
+  "kind": "idiom",
+  "gloss": "disaster suddenly erupted",
+  "ch": 5
+ },
+ {
+  "src": "OK, you can digitise and freight the minds of a crack combat team.",
+  "expr": "crack combat team",
+  "kind": "fixed",
+  "gloss": "elite, first-rate combat team",
+  "ch": 5
+ },
+ {
+  "src": "You can even decant your crack d.h.f. soldiers directly into sleeves with combat conditioning, jacked-up nervous systems and steroid built bodies.",
+  "expr": "jacked-up",
+  "kind": "slang",
+  "gloss": "artificially boosted/enhanced",
+  "ch": 5
+ },
+ {
+  "src": "“Whatever I come into contact with, I soak up, and I use that to get by.”",
+  "expr": "soak up",
+  "kind": "phrasal",
+  "gloss": "absorb (information)",
+  "ch": 5
+ },
+ {
+  "src": "“Whatever I come into contact with, I soak up, and I use that to get by.”",
+  "expr": "get by",
+  "kind": "phrasal",
+  "gloss": "manage; cope",
+  "ch": 5
+ },
+ {
+  "src": "He broke off as someone opened the door in the room below.",
+  "expr": "broke off",
+  "kind": "phrasal",
+  "gloss": "stopped speaking abruptly",
+  "ch": 5
+ },
+ {
+  "src": "“Oh. Yes. She barged in here, wanting something. Probably the keys to one of the limos. I’m an indulgent father, I suppose, and Naomi is my youngest.”",
+  "expr": "barged in",
+  "kind": "phrasal",
+  "gloss": "burst in rudely/unannounced",
+  "ch": 5
+ },
+ {
+  "src": "“But she’ll pull through. Do you need to talk to her?”",
+  "expr": "pull through",
+  "kind": "phrasal",
+  "gloss": "recover; survive the ordeal",
+  "ch": 5
+ },
+ {
+  "src": "“You say she barged in here. This is where it happened?”",
+  "expr": "barged in",
+  "kind": "phrasal",
+  "gloss": "burst in rudely/unannounced",
+  "ch": 5
+ },
+ {
+  "src": "That struck me as almost as extravagant as the Songspire in the hall, and in slightly more questionable taste.",
+  "expr": "struck me as",
+  "kind": "fixed",
+  "gloss": "seemed/appeared to me",
+  "ch": 5
+ },
+ {
+  "src": "On the World mirrorwood grows in forests on three continents, and practically every canal dive in Millsport has a bar top carved out of the stuff.",
+  "expr": "canal dive",
+  "kind": "slang",
+  "gloss": "seedy waterside bar",
+  "ch": 5
+ },
+ {
+  "src": "“Go on, Kovacs. Say it. Everyone else has. Either I committed suicide or my wife murdered me. There’s just no other reasonable explanation. I’ve been hearing it since they pulled me out of the tank at Alcatraz.”",
+  "expr": "Go on",
+  "kind": "phrasal",
+  "gloss": "proceed; say it",
+  "ch": 5
+ },
+ {
+  "src": "“Well, you’ll admit it makes for easier police work,” I said.",
+  "expr": "makes for",
+  "kind": "phrasal",
+  "gloss": "produces; leads to",
+  "ch": 5
+ },
+ {
+  "src": "“It’s nice and neat.”",
+  "expr": "nice and neat",
+  "kind": "fixed",
+  "gloss": "pleasingly tidy ('nice and' intensifier)",
+  "ch": 5
+ },
+ {
+  "src": "I found myself beginning to like this man despite myself.",
+  "expr": "despite myself",
+  "kind": "fixed",
+  "gloss": "against my own inclination",
+  "ch": 5
+ },
+ {
+  "src": "“It’s asking a lot to believe that someone got in here, past all the security, broke into a safe only you and your wife had access to and murdered you, without causing any disturbance. You’re an intelligent man, you must have some reason for believing it.”",
+  "expr": "asking a lot",
+  "kind": "idiom",
+  "gloss": "demanding a great deal (of credence)",
+  "ch": 5
+ },
+ {
+  "src": "“It’s asking a lot to believe that someone got in here, past all the security, broke into a safe only you and your wife had access to and murdered you, without causing any disturbance. You’re an intelligent man, you must have some reason for believing it.”",
+  "expr": "broke into",
+  "kind": "phrasal",
+  "gloss": "forcibly/illicitly opened",
+  "ch": 5
+ },
+ {
+  "src": "“All right. Let’s hear it.”",
+  "expr": "Let’s hear it",
+  "kind": "fixed",
+  "gloss": "go ahead and tell me",
+  "ch": 5
+ },
+ {
+  "src": "“I’m here. I’m back. You can’t kill me just by wiping out my cortical stack.”",
+  "expr": "wiping out",
+  "kind": "phrasal",
+  "gloss": "destroying completely; erasing",
+  "ch": 5
+ },
+ {
+  "src": "“And they keep your clones on ice there as well.”",
+  "expr": "on ice",
+  "kind": "idiom",
+  "gloss": "in cold storage; held in reserve",
+  "ch": 5
+ },
+ {
+  "src": "“All right, who else did know about it? Let’s narrow the field.”",
+  "expr": "narrow the field",
+  "kind": "idiom",
+  "gloss": "reduce the set of candidates/suspects",
+  "ch": 5
+ },
+ {
+  "src": "“My lawyer, Oumou Prescott. A couple of her legal aides. The director at PsychaSec. That’s about it.”",
+  "expr": "That’s about it",
+  "kind": "fixed",
+  "gloss": "that is essentially all",
+  "ch": 5
+ },
+ {
+  "src": "It came out in a rush.",
+  "expr": "came out in a rush",
+  "kind": "idiom",
+  "gloss": "was said all at once, in a hurried burst",
+  "ch": 5
+ },
+ {
+  "src": "Bancroft nodded. “For what it’s worth, they did, yes. West Coast law does not require taxi companies to keep records of their fleets’ whereabouts at any given time. Some of the more reputable firms do, of course, but there are others that don’t. Some even make a selling point of it. Client confidentiality, that sort of thing.”",
+  "expr": "For what it’s worth",
+  "kind": "idiom",
+  "gloss": "for whatever value it may have",
+  "ch": 5
+ },
+ {
+  "src": "Bancroft nodded. “For what it’s worth, they did, yes. West Coast law does not require taxi companies to keep records of their fleets’ whereabouts at any given time. Some of the more reputable firms do, of course, but there are others that don’t. Some even make a selling point of it. Client confidentiality, that sort of thing.”",
+  "expr": "make a selling point of",
+  "kind": "fixed",
+  "gloss": "promote as an advantage",
+  "ch": 5
+ },
+ {
+  "src": "The logical next question hung in the air between us.",
+  "expr": "hung in the air",
+  "kind": "idiom",
+  "gloss": "remained unspoken/unresolved",
+  "ch": 5
+ },
+ {
+  "src": "If Bancroft wasn’t going to share his reasons for wanting confidential transport, I wasn’t going to press him until I had a few other landmarks locked down.",
+  "expr": "locked down",
+  "kind": "phrasal",
+  "gloss": "firmly established; secured",
+  "ch": 5
+ },
+ {
+  "src": "“There is, in any case, some evidence to suggest that the vehicle in question might not have been a taxi. Field effect distribution, the police say. A pattern more in keeping with a larger vehicle.”",
+  "expr": "in keeping with",
+  "kind": "fixed",
+  "gloss": "consistent with",
+  "ch": 5
+ },
+ {
+  "src": "“I know. In any case, my tracks lead from the landing site, and apparently the condition of my shoes was in keeping with a two-kilometre trek across country. And then, finally, there was a call placed from this room shortly after three a.m. the night I was killed. A time check. There’s no voice on the line, only the sound of someone breathing.”",
+  "expr": "in keeping with",
+  "kind": "fixed",
+  "gloss": "consistent with",
+  "ch": 5
+ },
+ {
+  "src": "“They didn’t. They thought the solitary walk through the rain was very much in keeping with the act of suicide, and apparently they couldn’t see any inconsistency in a man wanting to check his internal chronochip before he blows his own head off. As you say, suicide is not a rational act. They have case histories of this sort of thing. Apparently, the world is full of incompetents who kill themselves and wake up in a new sleeve the next day. I’ve had it explained to me. They forget they’re wearing a stack, or it doesn’t seem important at the moment of the act. Our beloved medical welfare system brings them right back, suicide notes and requests notwithstanding. Curious abuse of rights, that. Is it the same system on Harlan’s World?”",
+  "expr": "in keeping with",
+  "kind": "fixed",
+  "gloss": "consistent with",
+  "ch": 5
+ },
+ {
+  "src": "“More or less. If the request is legally witnessed, then they have to let them go. Otherwise, failure to revive is a storage offence.”",
+  "expr": "let them go",
+  "kind": "phrasal",
+  "gloss": "allow them to die; release them",
+  "ch": 5
+ },
+ {
+  "src": "“Yes. It stops murderers passing their work off as suicide.”",
+  "expr": "passing their work off as",
+  "kind": "phrasal",
+  "gloss": "misrepresenting their work as",
+  "ch": 5
+ }
+]

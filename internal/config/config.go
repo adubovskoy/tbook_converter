@@ -71,6 +71,7 @@ type Config struct {
 	// Quality passes.
 	Glossary        bool   // build a book glossary and enforce it during translation (default on; --no-glossary disables)
 	OnlyGlossary    bool   // build/load the glossary, write it to <out-base>.glossary.json and open it for editing, then exit before translating
+	Repair          bool   // proofread pass between translate and align (default on for gonka only; --repair/--no-repair override)
 	Judge           bool   // run the semantic verification pass after translating
 	JudgeModel      string // model for the judge pass (default: same as Model)
 	JudgeScope      string // "flagged" (default): judge only lexcheck-flagged + low-coverage sentences + a small calibration sample | "all"
@@ -102,6 +103,14 @@ type Config struct {
 	EmbLayer  int     // hidden layer for token embeddings
 	EmbMethod string  // argmax (precision-first) | itermax (recall-first)
 	EmbQMin   float64 // hybrid gate: coverage threshold below which the LLM re-aligns
+
+	// UnitsFile is EXPERIMENTAL (research-only, empty in production): a probe
+	// JSON file ([{"src":…, "expr":…}]) naming known multi-word expressions,
+	// whose source word spans ride along with each embedding-align request so
+	// every word of an expression taps the group it rendered as. Inert unless
+	// the aligner child also has EMBALIGN_UNIT_GLUE set. See
+	// embalign.LoadUnitsFile.
+	UnitsFile string
 
 	// Invalidate, if set, names a file of source sentences whose cached
 	// translation+alignment should be cleared (verify/QA loop); the run then exits.
@@ -171,6 +180,13 @@ func Load(args []string) (*Config, error) {
 	// --lexcheck is kept as an accepted no-op for backward compatibility.
 	_ = fs.Bool("lexcheck", true, "(default; deprecated) static lexicon drift check — on unless --no-lexcheck")
 	noLexcheck := fs.Bool("no-lexcheck", envBool("NO_LEXCHECK", false), "disable the default static lexicon drift check")
+
+	// The proofread pass costs one more LLM call per sentence, so it is on where
+	// tokens are free (gonka) and off where they are metered — see
+	// translate.repairSystemPrompt for the measurement behind that split.
+	// --repair / --no-repair override the per-provider default either way.
+	repair := fs.Bool("repair", envBool("REPAIR", false), "proofread each translation before aligning (default: on for gonka, off otherwise)")
+	noRepair := fs.Bool("no-repair", envBool("NO_REPAIR", false), "skip the proofread pass even on gonka")
 	lexiconDir := fs.String("lexicons", envOr("LEXICON_DIR", "lexicons"), "lexicon directory for the drift check")
 	alignMode := fs.String("align-mode", envOr("ALIGN_MODE", AlignHybrid),
 		"alignment pass: hybrid (default: local embedding aligner + LLM fallback for gated sentences) | emb (embedding aligner only) | llm (LLM align pass)")
@@ -180,6 +196,8 @@ func Load(args []string) (*Config, error) {
 	embLayer := fs.Int("embalign-layer", envInt("EMBALIGN_LAYER", 8), "embedding aligner hidden layer")
 	embMethod := fs.String("embalign-method", envOr("EMBALIGN_METHOD", "argmax"), "embedding aligner matching: argmax (precision-first) | itermax (recall-first)")
 	embQ := fs.Float64("embalign-q", envFloat("EMBALIGN_Q", 0.7), "hybrid gate: alignment-coverage threshold below which the LLM align pass redoes the sentence")
+	unitsFile := fs.String("units-file", envOr("EMBALIGN_UNITS_FILE", ""),
+		"EXPERIMENTAL: probe JSON of known multi-word expressions whose source spans are sent to the embedding aligner (needs EMBALIGN_UNIT_GLUE in its env)")
 	stats := fs.String("stats", envOr("STATS_PATH", ""), "append per-request metrics (latency, status, tokens, cost) as JSONL to this file")
 	progressFile := fs.String("progress-file", envOr("PROGRESS_FILE", ""), "append machine-readable NDJSON progress events (phase, done, total) to this file during conversion")
 	providerSort := fs.String("provider-sort", envOr("PROVIDER_SORT", ""), "OpenRouter provider routing: throughput (fastest tokens/sec) | latency | price (empty = default routing)")
@@ -242,6 +260,7 @@ func Load(args []string) (*Config, error) {
 		SkipCitations:   *skipCitations,
 		Glossary:        !*noGlossary,
 		OnlyGlossary:    *onlyGlossary,
+		Repair:          *repair && !*noRepair,
 		Judge:           *judge,
 		JudgeModel:      *judgeModel,
 		JudgeScope:      strings.ToLower(strings.TrimSpace(*judgeScope)),
@@ -258,6 +277,7 @@ func Load(args []string) (*Config, error) {
 		EmbLayer:        *embLayer,
 		EmbMethod:       *embMethod,
 		EmbQMin:         *embQ,
+		UnitsFile:       *unitsFile,
 		Invalidate:      *invalidate,
 	}
 	if cfg.Provider == "llama.cpp" { // accept the project's own spelling
@@ -292,6 +312,7 @@ func Load(args []string) (*Config, error) {
 	concurrencySet := os.Getenv("CONCURRENCY") != ""
 	batchSet := os.Getenv("BATCH_SIZE") != ""
 	retriesSet := os.Getenv("MAX_RETRIES") != ""
+	repairSet := os.Getenv("REPAIR") != "" || os.Getenv("NO_REPAIR") != ""
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "align-mode":
@@ -302,6 +323,8 @@ func Load(args []string) (*Config, error) {
 			batchSet = true
 		case "max-retries":
 			retriesSet = true
+		case "repair", "no-repair":
+			repairSet = true
 		}
 	})
 	if cfg.JudgeScope != JudgeScopeAll && cfg.JudgeScope != JudgeScopeFlagged {
@@ -362,6 +385,14 @@ func Load(args []string) (*Config, error) {
 	}
 	if cfg.Provider == ProviderGonka && !retriesSet {
 		cfg.MaxRetries = defaultGonkaRetries
+	}
+	// The proofread pass is the one thing near-free tokens buy: on gonka it fixes
+	// agreement, non-words and calqued expressions on ~4% of a book's sentences
+	// at 87% precision for ~5 extra minutes (issue #8). Everywhere else tokens
+	// are metered and gemini-class models make far fewer of those errors, so it
+	// stays off. Either flag — or REPAIR/NO_REPAIR — wins over this default.
+	if !repairSet && cfg.Provider == ProviderGonka {
+		cfg.Repair = true
 	}
 	// OpenRouter ids carry a vendor prefix ("google/…"); Claude model ids never
 	// do. Under the claude provider, drop such leftovers from .env rather than

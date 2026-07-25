@@ -167,3 +167,37 @@ func TestAlignerBadHandshake(t *testing.T) {
 		t.Fatal("Start succeeded on error handshake")
 	}
 }
+
+// TestLoadUnitsFile checks the research-only probe→span lookup: word indices
+// are [start, end) and come out of the same word spans the .tbook stores.
+func TestLoadUnitsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "probe.json")
+	body := `[
+	 {"src": "Don't give up the day job, mate.", "expr": "Give up the day job"},
+	 {"src": "Don't give up the day job, mate.", "expr": "mate"},
+	 {"src": "Nothing here.", "expr": "absent phrase"}
+	]`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lookup, err := LoadUnitsFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "Don't give up the day job, mate."
+	//  0-5   6-10 11-13 14-17 18-21 22-25 27-31
+	src := "Don't give up the day job, mate."
+	words := [][2]int{{0, 5}, {6, 10}, {11, 13}, {14, 17}, {18, 21}, {22, 25}, {27, 31}}
+	got := lookup(src, words)
+	want := [][2]int{{1, 6}, {6, 7}} // give..job (case-insensitive), then mate
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("units = %v, want %v", got, want)
+	}
+	if u := lookup("Nothing here.", [][2]int{{0, 7}, {8, 12}}); u != nil {
+		t.Errorf("expr not present in src: units = %v, want nil", u)
+	}
+	if u := lookup("Unknown sentence.", [][2]int{{0, 7}}); u != nil {
+		t.Errorf("sentence absent from file: units = %v, want nil", u)
+	}
+}

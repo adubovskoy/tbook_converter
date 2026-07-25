@@ -336,12 +336,16 @@ func convert(cfg *config.Config, runStart time.Time) error {
 			via = cfg.Model + " (llama.cpp at " + cfg.BaseURL + ")"
 		}
 		fmt.Printf("Translating %s→%s via %s ...\n", cfg.Source, strings.Join(cfg.Targets, ","), via)
+		if cfg.Repair {
+			fmt.Println("Proofread pass ON (one extra LLM pass over every translation before aligning).")
+		}
 		pipe := &translate.Pipeline{
 			Client: client, CacheDir: cfg.CacheDir, Source: cfg.Source,
 			BatchSize: cfg.BatchSize, AlignBatch: cfg.AlignBatch,
 			Concurrency: cfg.Concurrency,
 			Force:       cfg.Force,
 			Glossary:    glossary, CacheModel: cacheModel,
+			Repair:    cfg.Repair,
 			AlignMode: cfg.AlignMode, EmbQMin: cfg.EmbQMin,
 			Progress: progressLog,
 		}
@@ -356,6 +360,17 @@ func convert(cfg *config.Config, runStart time.Time) error {
 				defer aligner.Close()
 				pipe.EmbAligner = aligner
 				pipe.LexDicts = lexDictLoader(cfg)
+				// EXPERIMENTAL (research-only): expression spans for the
+				// aligner's unit-glue step. Off unless --units-file is given.
+				if cfg.UnitsFile != "" {
+					units, uerr := embalign.LoadUnitsFile(cfg.UnitsFile)
+					if uerr != nil {
+						return uerr
+					}
+					pipe.Units = units
+					fmt.Printf("EXPERIMENTAL unit spans from %s (aligner glue: EMBALIGN_UNIT_GLUE=%q)\n",
+						cfg.UnitsFile, os.Getenv("EMBALIGN_UNIT_GLUE"))
+				}
 			case cfg.AlignModeExplicit:
 				return err
 			default:
@@ -380,7 +395,8 @@ func convert(cfg *config.Config, runStart time.Time) error {
 
 	// Fill from cache + assemble. Citation sentences are filled too (they may
 	// be cached from earlier runs); missing ones stay empty.
-	found, missing := translate.FillFromCache(allSents, cfg.Targets, cfg.CacheDir, cfg.Source, cacheModel)
+	found, missing := translate.FillFromCache(allSents, cfg.Targets, cfg.CacheDir, cfg.Source,
+		finalModel(cfg, cacheModel), cacheModel, cfg.Repair)
 	fmt.Printf("Filled %d translations from cache (%d missing).\n", found, missing)
 
 	// Verification passes. Lexcheck is the free, offline gate: a bilingual
@@ -752,6 +768,16 @@ func runLexcheck(cfg *config.Config, sentences []*tbook.Sentence) []string {
 }
 
 // subsetBySrc returns the unique sentences whose source is in srcs.
+// finalModel is the cache namespace of the FINAL aligned entry: the glossary
+// namespace, plus the repair marker when the run proofreads — an alignment of
+// proofread text must never answer for an unrepaired run.
+func finalModel(cfg *config.Config, cacheModel string) string {
+	if cfg.Repair {
+		return translate.RepairCacheModel(cacheModel)
+	}
+	return cacheModel
+}
+
 func subsetBySrc(sentences []*tbook.Sentence, srcs []string) []*tbook.Sentence {
 	set := make(map[string]bool, len(srcs))
 	for _, src := range srcs {
@@ -785,7 +811,8 @@ func escalateRun(ctx context.Context, cfg *config.Config, glossary []translate.G
 	if err := pipe.Run(ctx, subset, cfg.Targets); err != nil {
 		return err
 	}
-	found, missing := translate.FillFromCache(subset, cfg.Targets, cfg.CacheDir, cfg.Source, cacheModel)
+	found, missing := translate.FillFromCache(subset, cfg.Targets, cfg.CacheDir, cfg.Source,
+		finalModel(cfg, cacheModel), cacheModel, cfg.Repair)
 	fmt.Printf("Escalation done: %d refreshed (%d missing).\n", found, missing)
 	return nil
 }
@@ -882,7 +909,8 @@ func reverifyEscalated(ctx context.Context, cfg *config.Config, glossary []trans
 			}
 		}
 	}
-	translate.FillFromCache(subsetBySrc(subset, still), cfg.Targets, cfg.CacheDir, cfg.Source, cacheModel)
+	translate.FillFromCache(subsetBySrc(subset, still), cfg.Targets, cfg.CacheDir, cfg.Source,
+		finalModel(cfg, cacheModel), cacheModel, cfg.Repair)
 	path := cfg.Out + ".unverified.json"
 	_ = translate.WriteFlagged(path, still)
 	fmt.Printf("Escalation left %d sentences unverified (%d ship raw with no highlights, "+

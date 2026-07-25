@@ -160,6 +160,45 @@ func TestOpenRouterDefaultsUnchanged(t *testing.T) {
 	}
 }
 
+// The proofread pass is on for gonka (free tokens) and off elsewhere; both
+// flags and both env vars override that either way.
+func TestRepairDefaults(t *testing.T) {
+	clearProviderEnv(t)
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"gonka on by default", []string{"book.epub", "--provider", "gonka"}, true},
+		{"openrouter off by default", []string{"book.epub"}, false},
+		{"gonka opts out", []string{"book.epub", "--provider", "gonka", "--no-repair"}, false},
+		{"openrouter opts in", []string{"book.epub", "--repair"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := Load(c.args)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Repair != c.want {
+				t.Errorf("Repair = %v, want %v", cfg.Repair, c.want)
+			}
+		})
+	}
+}
+
+func TestRepairEnvOverridesGonkaDefault(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("NO_REPAIR", "1")
+	cfg, err := Load([]string{"book.epub", "--provider", "gonka"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Repair {
+		t.Error("Repair = true, want false (NO_REPAIR=1 must beat the gonka default)")
+	}
+}
+
 func TestGonkaDefaults(t *testing.T) {
 	clearProviderEnv(t)
 	cfg, err := Load([]string{"book.epub", "--provider", "gonka"})

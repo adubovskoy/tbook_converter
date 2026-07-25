@@ -10,6 +10,13 @@ prints {"ready": true}; then for each request line
 share one padded forward pass (likewise targets), which is ~2x faster than
 one-by-one on CPU. EOF on stdin exits. Progress/diagnostics go to stderr.
 
+A request item may additionally carry "units" (EXPERIMENTAL, research-only):
+a list of known multi-word expression spans as SOURCE WORD index ranges
+[start, end) — inclusive start, exclusive end — into that item's "src" list,
+e.g. {"src": [...], "tgt": [...], "units": [[4, 6], [11, 12]]}. They feed the
+unit-glue step, which is itself off unless EMBALIGN_UNIT_GLUE is set; an item
+without "units" (or with the env unset) is handled exactly as before.
+
 Method (after SimAlign, Jalili Sabet et al. 2020): token embeddings from a
 multilingual encoder (LaBSE by default, hidden layer 8), cosine similarity
 over subwords, then
@@ -99,11 +106,12 @@ def to_word_pairs(sub_pairs, src_wids, tgt_wids):
     return sorted({(src_wids[i], tgt_wids[j]) for i, j in sub_pairs})
 
 
-def align_pair(model, tokenizer, src_words, tgt_words, layer, method):
+def align_pair(model, tokenizer, src_words, tgt_words, layer, method, units=None):
     """Word alignment for one pre-split sentence pair -> sorted [s, t] pairs.
     Empty/blank words are excluded from the model input but original indices
     are preserved in the output pairs."""
-    return align_batch(model, tokenizer, [(src_words, tgt_words)], layer, method)[0]
+    return align_batch(model, tokenizer, [(src_words, tgt_words)], layer, method,
+                       [units])[0]
 
 
 # GLUE_MIN gates the idiom-glue step (0 disables): an uncovered source word is
@@ -121,6 +129,56 @@ GLUE_MIN = float(os.environ.get("EMBALIGN_GLUE_MIN", "0.3"))
 # "estaba nervioso"), mutual argmax awards the group's argmax winner only, and
 # the remaining group members would ship unaligned.
 TGT_GLUE_MIN = float(os.environ.get("EMBALIGN_TGT_GLUE_MIN", "") or GLUE_MIN)
+
+
+# UNIT_GLUE gates the EXPERIMENTAL expression-aware glue step (research-only,
+# OFF unless EMBALIGN_UNIT_GLUE is set to a truthy value). Its input is the
+# request's optional "units" — spans of source words that form one known
+# multi-word expression (idiom / phrasal verb / slang / fixed expression),
+# supplied by the caller from a lexicon, NOT inferred here.
+UNIT_GLUE = (os.environ.get("EMBALIGN_UNIT_GLUE", "") or "0").strip().lower() \
+    not in ("", "0", "false", "no", "off")
+
+
+def glue_units(word_pairs, units):
+    """EXPERIMENTAL: make every word of a known expression tap the whole group
+    the expression rendered as.
+
+    Contract: for each unit span [start, end) of SOURCE word indices, collect
+    the target words that ANY word of the unit is already aligned to; if that
+    set is non-empty, align EVERY word of the unit to EVERY target word in it.
+    Deterministic, no threshold, additive only (never removes a pair), and it
+    never invents an anchor: a unit whose words are all unaligned is left
+    alone. Words outside units are untouched.
+
+    Guard: skip the unit when the collected target set is larger than
+    max(3, 2 * unit_length). A unit that already claims a big scattered target
+    set is evidence of a mis-alignment, and smearing every unit word over all
+    of it would turn one bad pair into a whole wrong clause under the tap.
+    The cap is generous enough for the real cases (a 2-word phrasal verb
+    rendering as up to 3 target words, a 5-word idiom as up to 10).
+
+    Indices are the ORIGINAL request indices (this runs after the local->
+    request index mapping), which is the space "units" is expressed in.
+    """
+    if not UNIT_GLUE or not units:
+        return word_pairs
+    pairs = {(int(s), int(t)) for s, t in word_pairs}
+    for u in units:
+        if len(u) != 2:
+            continue
+        a, b = int(u[0]), int(u[1])
+        if b <= a:
+            continue
+        tset = sorted({t for (s, t) in pairs if a <= s < b})
+        if not tset:
+            continue  # no anchor anywhere in the unit: invent nothing
+        if len(tset) > max(3, 2 * (b - a)):
+            continue  # guard: refuse to smear a suspiciously wide target set
+        for s in range(a, b):
+            for t in tset:
+                pairs.add((s, t))
+    return sorted([s, t] for s, t in pairs)
 
 
 def glue_idioms(word_pairs, sim, s_wids, t_wids):
@@ -196,14 +254,17 @@ def glue_target(word_pairs, sim, s_wids, t_wids):
     return sorted(word_pairs + added)
 
 
-def match_pairs(sv, s_wids, tv, t_wids, s_map, t_map, method):
-    """Similarity + argmax matching for one encoded pair -> [s, t] word pairs."""
+def match_pairs(sv, s_wids, tv, t_wids, s_map, t_map, method, units=None):
+    """Similarity + argmax matching for one encoded pair -> [s, t] word pairs.
+    `units` (optional) drives the experimental unit-glue step, which runs last
+    and in request-index space (see glue_units)."""
     sim = sv @ tv.T
     sub = itermax_pairs(sim) if method == "itermax" else argmax_pairs(sim)
     local = [[s, t] for s, t in to_word_pairs(sub, s_wids, t_wids)]
     local = glue_idioms(local, sim, s_wids, t_wids)
     local = glue_target(local, sim, s_wids, t_wids)
-    return [[s_map[s], t_map[t]] for s, t in local]
+    pairs = [[s_map[s], t_map[t]] for s, t in local]
+    return glue_units(pairs, units)
 
 
 def encode_sorted(model, tokenizer, word_lists, layer, sub_batch=32):
@@ -221,11 +282,12 @@ def encode_sorted(model, tokenizer, word_lists, layer, sub_batch=32):
     return results
 
 
-def align_batch(model, tokenizer, items, layer, method):
+def align_batch(model, tokenizer, items, layer, method, units_list=None):
     """Word alignment for many pre-split (src_words, tgt_words) pairs. Sources
     are encoded in length-sorted padded sub-batches, targets likewise — the
     matching per pair is identical to align_pair (padding subwords are excluded
-    via word_ids), so results match the one-by-one path."""
+    via word_ids), so results match the one-by-one path. `units_list`, when
+    given, is parallel to `items` (None per item = no expression spans)."""
     maps = []
     src_in, tgt_in = [], []
     for src_words, tgt_words in items:
@@ -238,13 +300,14 @@ def align_batch(model, tokenizer, items, layer, method):
     src_vecs = encode_sorted(model, tokenizer, src_in, layer) if src_in else []
     tgt_vecs = encode_sorted(model, tokenizer, tgt_in, layer) if tgt_in else []
     out, k = [], 0
-    for s_map, t_map in maps:
+    for i, (s_map, t_map) in enumerate(maps):
         if not s_map or not t_map:
             out.append([])
             continue
         (sv, s_wids), (tv, t_wids) = src_vecs[k], tgt_vecs[k]
         k += 1
-        out.append(match_pairs(sv, s_wids, tv, t_wids, s_map, t_map, method))
+        units = units_list[i] if units_list else None
+        out.append(match_pairs(sv, s_wids, tv, t_wids, s_map, t_map, method, units))
     return out
 
 
@@ -284,6 +347,9 @@ def main():
             model = torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
         print("int8 dynamic quantization enabled", file=sys.stderr)
 
+    if UNIT_GLUE:
+        print("EXPERIMENTAL unit glue enabled (EMBALIGN_UNIT_GLUE)", file=sys.stderr)
+
     print(json.dumps({"ready": True}), flush=True)
     for line in sys.stdin:
         if not line.strip():
@@ -296,11 +362,13 @@ def main():
                     model, tokenizer,
                     [(it["src"], it["tgt"]) for it in req["batch"]],
                     args.layer, method,
+                    [it.get("units") for it in req["batch"]],
                 )
                 results = [{"pairs": p} for p in pairs_list]
                 print(json.dumps({"results": results}), flush=True)
             else:
-                pairs = align_pair(model, tokenizer, req["src"], req["tgt"], args.layer, method)
+                pairs = align_pair(model, tokenizer, req["src"], req["tgt"], args.layer, method,
+                                   req.get("units"))
                 print(json.dumps({"pairs": pairs}), flush=True)
         except Exception as e:  # keep serving; the caller decides what to do
             print(json.dumps({"error": f"{type(e).__name__}: {e}"}), flush=True)

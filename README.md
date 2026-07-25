@@ -94,6 +94,10 @@ Core: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
 `.tbook_cache`), `--limit-chapters N`, `--dry-run`, `--force` (ignore cache),
 `--stats file.jsonl` (per-request latency/provider/tokens/cost log), `-v`.
 
+`--repair` / `--no-repair` — the proofread pass (see below). **On by default for
+`--provider gonka`, off everywhere else**; either flag (or `REPAIR` / `NO_REPAIR`)
+overrides that.
+
 Machine integration (for scripts and services driving the converter):
 
 - `--estimate` — parse + segment only (no API calls, no key, no python) and
@@ -181,6 +185,19 @@ gated sentences. The raw pass-1 text is canonical: alignment can place
 highlights but can never rewrite the text. Everything is cached per sentence
 (`promptVersion|model|source|target|src`), so runs resume and contract bumps
 re-align without re-translating.
+
+Between the two, an optional **pass 1.5 proofreads** the translation
+(`{id,src,tr}` → fixed text) so pass 2 aligns the text that actually ships. It
+fixes what a learner would copy — agreement, verb/preposition government,
+non-words, calqued idioms, register — and is forbidden to paraphrase, to guess a
+character's gender or referent without context, or to touch the enforced
+glossary. Measured on gonka/Kimi-K2.6: it rewrites ~4% of a book's sentences and
+wins 87% of the decisive blind pairwise judgements on exactly those sentences
+(p=3.4e-05), for ~5 extra minutes and no change in alignment coverage. That is
+why it is default-on where tokens are free and off where they are metered.
+Proofread text lives in its own cache namespace and the final aligned entry
+carries a `+rp` marker, so toggling the pass never re-translates a book and never
+serves an alignment built from the other variant.
 
 Idioms and phrasal verbs map as units: "piss off" → "отвали" claims both
 source words (tapping either highlights the pair). The LLM align prompt has an
