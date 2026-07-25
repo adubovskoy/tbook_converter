@@ -102,6 +102,14 @@ type Config struct {
 	EmbMethod string  // argmax (precision-first) | itermax (recall-first)
 	EmbQMin   float64 // hybrid gate: coverage threshold below which the LLM re-aligns
 
+	// UnitsFile is EXPERIMENTAL (research-only, empty in production): a probe
+	// JSON file ([{"src":…, "expr":…}]) naming known multi-word expressions,
+	// whose source word spans ride along with each embedding-align request so
+	// every word of an expression taps the group it rendered as. Inert unless
+	// the aligner child also has EMBALIGN_UNIT_GLUE set. See
+	// embalign.LoadUnitsFile.
+	UnitsFile string
+
 	// Invalidate, if set, names a file of source sentences whose cached
 	// translation+alignment should be cleared (verify/QA loop); the run then exits.
 	Invalidate string
@@ -178,6 +186,8 @@ func Load(args []string) (*Config, error) {
 	embLayer := fs.Int("embalign-layer", envInt("EMBALIGN_LAYER", 8), "embedding aligner hidden layer")
 	embMethod := fs.String("embalign-method", envOr("EMBALIGN_METHOD", "argmax"), "embedding aligner matching: argmax (precision-first) | itermax (recall-first)")
 	embQ := fs.Float64("embalign-q", envFloat("EMBALIGN_Q", 0.7), "hybrid gate: alignment-coverage threshold below which the LLM align pass redoes the sentence")
+	unitsFile := fs.String("units-file", envOr("EMBALIGN_UNITS_FILE", ""),
+		"EXPERIMENTAL: probe JSON of known multi-word expressions whose source spans are sent to the embedding aligner (needs EMBALIGN_UNIT_GLUE in its env)")
 	stats := fs.String("stats", envOr("STATS_PATH", ""), "append per-request metrics (latency, status, tokens, cost) as JSONL to this file")
 	progressFile := fs.String("progress-file", envOr("PROGRESS_FILE", ""), "append machine-readable NDJSON progress events (phase, done, total) to this file during conversion")
 	providerSort := fs.String("provider-sort", envOr("PROVIDER_SORT", ""), "OpenRouter provider routing: throughput (fastest tokens/sec) | latency | price (empty = default routing)")
@@ -255,6 +265,7 @@ func Load(args []string) (*Config, error) {
 		EmbLayer:        *embLayer,
 		EmbMethod:       *embMethod,
 		EmbQMin:         *embQ,
+		UnitsFile:       *unitsFile,
 		Invalidate:      *invalidate,
 	}
 	if cfg.Provider == "llama.cpp" { // accept the project's own spelling
