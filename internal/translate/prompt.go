@@ -65,6 +65,70 @@ translation as a STRING. No code fences, no commentary. Translate EVERY sentence
 	return sb.String()
 }
 
+// repairSystemPrompt is pass 1.5 — proofread an existing translation and fix
+// only what is WRONG, leaving everything else byte-identical. It never
+// re-translates: the align pass locates fragments inside this text, and a
+// rewritten-to-taste sentence would be a second variable in every comparison.
+//
+// Measured on gonka/Kimi-K2.6 (issue #8): it changes ~4% of a book's sentences
+// and wins 87% of the decisive blind pairwise judgements on exactly those
+// sentences (p=3.4e-05), at no cost to alignment coverage. The two rules that
+// make it safe rather than harmful are both here and both were learned the hard
+// way: the glossary must be visible (without it the pass "corrects" the book's
+// own enforced terms into literal ones — «оболочка», a body, into «рукав»), and
+// context-free guessing must be forbidden (without that rule it flips a
+// character's gender wherever the source is genderless). Adding the neighbouring
+// sentences as context beats this prompt on quality but triples the phase's wall
+// time and breaks the 30-minute budget, so production stays context-free.
+func repairSystemPrompt(sourceName, targetName string, glossary []GlossEntry) string {
+	r := strings.NewReplacer("{SRC}", sourceName, "{TGT}", targetName)
+	base := r.Replace(`You proofread {TGT} translations of {SRC} sentences for a language-learning reader: the app
+shows the translation beside the original and highlights matching word pairs, so every
+{TGT} word must be correct {TGT} that a learner can safely imitate.
+
+You receive a JSON array of items {id, src, tr}: src is the {SRC} original, tr its {TGT} translation.
+
+For EACH item, return tr FIXED — but ONLY where it is genuinely wrong:
+- GRAMMAR: gender/number/case agreement, verb conjugation, verb and preposition government.
+  A malformed or non-existent {TGT} word is always an error.
+- CALQUES: a word-by-word rendering of a {SRC} idiom, phrasal verb, slang or fixed expression
+  that is not real {TGT} — replace it with the natural {TGT} expression of the same meaning
+  and the same register.
+- REGISTER: slang stays slang, formal stays formal.
+- FIDELITY: restore a dropped meaning element of src, delete anything invented, and never
+  leave {SRC} words in the translation.
+- PHRASING: where tr is grammatical but reads as translated-from-{SRC} rather than written
+  in {TGT} — unidiomatic collocations, clumsy clause order, a stiff literal choice where
+  {TGT} has an ordinary word — rewrite that part into what a {TGT} author would write.
+  Keep the same meaning, the same register, and the same sentence boundaries.
+Change NOTHING else: keep tr's wording, word order and style wherever it is already correct.
+Do not merge or split sentences, do not alter names, numbers or quoted speech.
+You see ONE sentence at a time with no surrounding context: never "correct" the gender of a
+person, the referent of a pronoun, or a recurring term just because it looks unexpected —
+without the context that decided it, such a change is a guess, and guessing here breaks the
+book. MOST ITEMS NEED NO CHANGE — then return tr exactly as given.`)
+	if len(glossary) > 0 {
+		var sb strings.Builder
+		sb.WriteString(base)
+		sb.WriteString("\n\nGLOSSARY — these ")
+		sb.WriteString(targetName)
+		sb.WriteString(" renderings are enforced across the whole book. They are CORRECT by\n")
+		sb.WriteString("decision, even where a different word looks more literal — never change them:\n")
+		for _, e := range glossary {
+			sb.WriteString("- ")
+			sb.WriteString(e.Src)
+			sb.WriteString(" → ")
+			sb.WriteString(e.Tgt)
+			sb.WriteString("\n")
+		}
+		base = strings.TrimRight(sb.String(), "\n")
+	}
+	return base + r.Replace(`
+
+Reply with ONLY a single JSON object mapping each "id" (exact string) to the final {TGT}
+sentence as a STRING. No code fences, no commentary. Output EVERY item.`)
+}
+
 // alignSystemPrompt is pass 2 — align only, given the finished translation. The
 // model receives NUMBERED source words and echoes "index:text" tokens; the
 // producer trusts an index only when its echoed text matches, else falls back
