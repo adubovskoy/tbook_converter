@@ -70,6 +70,7 @@ type Config struct {
 
 	// Quality passes.
 	Glossary        bool   // build a book glossary and enforce it during translation (default on; --no-glossary disables)
+	Repair          bool   // proofread pass between translate and align (default on for gonka only; --repair/--no-repair override)
 	Judge           bool   // run the semantic verification pass after translating
 	JudgeModel      string // model for the judge pass (default: same as Model)
 	JudgeScope      string // "flagged" (default): judge only lexcheck-flagged + low-coverage sentences + a small calibration sample | "all"
@@ -177,6 +178,13 @@ func Load(args []string) (*Config, error) {
 	// --lexcheck is kept as an accepted no-op for backward compatibility.
 	_ = fs.Bool("lexcheck", true, "(default; deprecated) static lexicon drift check — on unless --no-lexcheck")
 	noLexcheck := fs.Bool("no-lexcheck", envBool("NO_LEXCHECK", false), "disable the default static lexicon drift check")
+
+	// The proofread pass costs one more LLM call per sentence, so it is on where
+	// tokens are free (gonka) and off where they are metered — see
+	// translate.repairSystemPrompt for the measurement behind that split.
+	// --repair / --no-repair override the per-provider default either way.
+	repair := fs.Bool("repair", envBool("REPAIR", false), "proofread each translation before aligning (default: on for gonka, off otherwise)")
+	noRepair := fs.Bool("no-repair", envBool("NO_REPAIR", false), "skip the proofread pass even on gonka")
 	lexiconDir := fs.String("lexicons", envOr("LEXICON_DIR", "lexicons"), "lexicon directory for the drift check")
 	alignMode := fs.String("align-mode", envOr("ALIGN_MODE", AlignHybrid),
 		"alignment pass: hybrid (default: local embedding aligner + LLM fallback for gated sentences) | emb (embedding aligner only) | llm (LLM align pass)")
@@ -249,6 +257,7 @@ func Load(args []string) (*Config, error) {
 		NoNotes:         *noNotes,
 		SkipCitations:   *skipCitations,
 		Glossary:        !*noGlossary,
+		Repair:          *repair && !*noRepair,
 		Judge:           *judge,
 		JudgeModel:      *judgeModel,
 		JudgeScope:      strings.ToLower(strings.TrimSpace(*judgeScope)),
@@ -300,6 +309,7 @@ func Load(args []string) (*Config, error) {
 	concurrencySet := os.Getenv("CONCURRENCY") != ""
 	batchSet := os.Getenv("BATCH_SIZE") != ""
 	retriesSet := os.Getenv("MAX_RETRIES") != ""
+	repairSet := os.Getenv("REPAIR") != "" || os.Getenv("NO_REPAIR") != ""
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "align-mode":
@@ -310,6 +320,8 @@ func Load(args []string) (*Config, error) {
 			batchSet = true
 		case "max-retries":
 			retriesSet = true
+		case "repair", "no-repair":
+			repairSet = true
 		}
 	})
 	if cfg.JudgeScope != JudgeScopeAll && cfg.JudgeScope != JudgeScopeFlagged {
@@ -370,6 +382,14 @@ func Load(args []string) (*Config, error) {
 	}
 	if cfg.Provider == ProviderGonka && !retriesSet {
 		cfg.MaxRetries = defaultGonkaRetries
+	}
+	// The proofread pass is the one thing near-free tokens buy: on gonka it fixes
+	// agreement, non-words and calqued expressions on ~4% of a book's sentences
+	// at 87% precision for ~5 extra minutes (issue #8). Everywhere else tokens
+	// are metered and gemini-class models make far fewer of those errors, so it
+	// stays off. Either flag — or REPAIR/NO_REPAIR — wins over this default.
+	if !repairSet && cfg.Provider == ProviderGonka {
+		cfg.Repair = true
 	}
 	// OpenRouter ids carry a vendor prefix ("google/…"); Claude model ids never
 	// do. Under the claude provider, drop such leftovers from .env rather than

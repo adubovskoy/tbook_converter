@@ -49,6 +49,25 @@ func TrKey(src, source, target, model string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// RepairPromptVersion keys the PROOFREAD (pass 1.5) contract. Bump only if the
+// repair prompt/rules change: it re-proofreads from the cached raw translations
+// without re-translating them. r1 = the adopted recipe — grammar, calqued
+// expressions, register and fidelity, with the book glossary injected and no
+// context-free guessing of gender, referents or recurring terms.
+const RepairPromptVersion = "r1"
+
+// RepairKey returns the cache key for a sentence's PROOFREAD translation, the
+// text the align pass consumes when repair is on. Its own namespace ("|rp|")
+// keyed by the RAW model component on purpose: the raw translation is identical
+// with and without repair, so toggling repair costs one proofread pass, never a
+// re-translation. What must not be shared is the FINAL aligned entry — Key gets
+// the repair marker from the caller's model string instead.
+func RepairKey(src, source, target, model string) string {
+	raw := RepairPromptVersion + "|rp|" + model + "|" + source + "|" + target + "|" + src
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
 // Invalidate deletes the cached translation AND alignment for each source
 // sentence (across all targets) — used by the verify/QA loop: a semantic check
 // flags bad sentences, this clears them, and the next run redoes exactly those

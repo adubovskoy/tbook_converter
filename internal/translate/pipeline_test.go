@@ -87,7 +87,7 @@ func TestTwoPassPipeline(t *testing.T) {
 	if p := CountPending(sentences, []string{"ru"}, cacheDir, "en", model, false); p != 0 {
 		t.Fatalf("expected 0 pending after run, got %d", p)
 	}
-	found, missing := FillFromCache(sentences, []string{"ru"}, cacheDir, "en", model)
+	found, missing := FillFromCache(sentences, []string{"ru"}, cacheDir, "en", model, model, false)
 	if found != 2 || missing != 0 {
 		t.Fatalf("fill: found=%d missing=%d", found, missing)
 	}

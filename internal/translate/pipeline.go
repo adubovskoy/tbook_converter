@@ -97,6 +97,13 @@ type Pipeline struct {
 	Glossary   []GlossEntry
 	CacheModel string // cache-key model component; empty = Client model
 
+	// Repair runs the proofread pass (1.5) between translate and align: the
+	// align pass then consumes the proofread text, and the final cache entry is
+	// namespaced with RepairCacheModel so it never answers for an unrepaired
+	// run. Default-on for gonka only — see repairSystemPrompt for what it fixes
+	// and why it is off where tokens are metered.
+	Repair bool
+
 	// Embedding alignment (see AlignLLM/AlignEmb/AlignHybrid). EmbAligner must
 	// be non-nil for the emb/hybrid modes. LexDicts, when non-nil, supplies the
 	// per-target lexcheck dictionary for the hybrid gate (nil dict = Q-only
@@ -163,14 +170,30 @@ func (p *Pipeline) noteErr(err error) {
 	p.mu.Unlock()
 }
 
-// cacheModel is the model string used in cache keys. CacheKeyModel builds the
-// glossary-suffixed form shared by the pipeline and the offline cache fill.
-func (p *Pipeline) cacheModel() string {
+// rawModel is the cache-key model component of the RAW translation: the model
+// id plus any glossary hash, WITHOUT the repair marker. cacheModel adds the
+// marker for the final aligned entry, whose text differs between a repaired and
+// an unrepaired run and must therefore never be shared between them.
+func (p *Pipeline) rawModel() string {
 	if p.CacheModel != "" {
 		return p.CacheModel
 	}
 	return p.Client.opts.Model
 }
+
+// cacheModel is the namespace of the FINAL aligned entry.
+func (p *Pipeline) cacheModel() string {
+	if p.Repair {
+		return RepairCacheModel(p.rawModel())
+	}
+	return p.rawModel()
+}
+
+// RepairCacheModel marks a cache-key model component as produced with the
+// proofread pass on. Only the FINAL aligned entry carries it: an alignment of
+// proofread text must never answer for an unrepaired run, while the raw
+// translation the proofreader consumes is the same either way.
+func RepairCacheModel(model string) string { return model + "+rp" }
 
 // CacheKeyModel returns the cache-key model component for a model and an
 // optional glossary hash (empty hash = plain model).
@@ -186,12 +209,20 @@ type item struct {
 	s   *tbook.Sentence
 }
 
-// translateInput / alignInput are one sentence as sent to the model, per phase.
+// translateInput / repairInput / alignInput are one sentence as sent to the
+// model, per phase.
 // (No character offsets: the model echoes numbered source-word text; offsets
 // are computed locally by align.BuildTextAlign.)
 type translateInput struct {
 	ID  string `json:"id"`
 	Src string `json:"src"`
+}
+
+// repairInput carries the existing translation for the proofreader to fix.
+type repairInput struct {
+	ID  string `json:"id"`
+	Src string `json:"src"`
+	Tr  string `json:"tr"`
 }
 
 type alignInput struct {
@@ -235,14 +266,29 @@ type phase int
 
 const (
 	phaseTranslate phase = iota
+	phaseRepair
 	phaseAlign
 )
 
 func (ph phase) String() string {
-	if ph == phaseTranslate {
+	switch ph {
+	case phaseTranslate:
 		return "translate"
+	case phaseRepair:
+		return "repair"
+	default:
+		return "align"
 	}
-	return "align"
+}
+
+// textKey is the cache key holding the text a phase produces or consumes: the
+// proofread text when repair is on, the raw pass-1 translation otherwise. Both
+// live in the RAW model namespace, so toggling repair never re-translates.
+func (p *Pipeline) textKey(src, target string) string {
+	if p.Repair {
+		return cache.RepairKey(src, p.Source, target, p.rawModel())
+	}
+	return cache.TrKey(src, p.Source, target, p.rawModel())
 }
 
 // Run translates every target language (hub-and-spoke: each target is
@@ -261,9 +307,14 @@ func (p *Pipeline) Run(ctx context.Context, sentences []*tbook.Sentence, targets
 // then align everything translated-but-unaligned. Decoupling avoids the
 // positional drift a single translate+align pass falls into at batch scale.
 func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, target string) error {
-	needTr, needAl, nUnique, cached := p.pendingTwoPhase(sentences, target, p.Force)
-	fmt.Printf("[%s] %d unique sentences — %d cached, %d to translate, %d to align\n",
-		target, nUnique, cached, len(needTr), len(needAl))
+	needTr, needRp, needAl, nUnique, cached := p.pendingTwoPhase(sentences, target, p.Force)
+	if p.Repair {
+		fmt.Printf("[%s] %d unique sentences — %d cached, %d to translate, %d to proofread, %d to align\n",
+			target, nUnique, cached, len(needTr), len(needRp), len(needAl))
+	} else {
+		fmt.Printf("[%s] %d unique sentences — %d cached, %d to translate, %d to align\n",
+			target, nUnique, cached, len(needTr), len(needAl))
+	}
 
 	p.mu.Lock()
 	p.totalSents = nUnique
@@ -285,7 +336,30 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 	// was just rewritten, and keeping force on would put every sentence back in
 	// the translate set and skip the align phase entirely (escalated sentences
 	// then ship with no alignment at all).
-	if _, needAl, _, _ = p.pendingTwoPhase(sentences, target, false); len(needAl) > 0 {
+	// Pass 1.5: proofread the raw translations, so the align pass locates
+	// fragments inside the text that actually ships. Recomputed after the
+	// translate phase, which just produced more proofreadable sentences.
+	if p.Repair {
+		if _, needRp, _, _, _ = p.pendingTwoPhase(sentences, target, false); len(needRp) > 0 {
+			sys := repairSystemPrompt(LangName(p.Source), LangName(target), p.Glossary)
+			t0 := time.Now()
+			if err := p.runPhase(ctx, sys, needRp, target, phaseRepair); err != nil {
+				return err
+			}
+			el := time.Since(t0)
+			fmt.Printf("[%s] proofread phase: %d sentences in %s (%.1f sent/s)\n",
+				target, len(needRp), el.Round(time.Second), float64(len(needRp))/el.Seconds())
+			// A sentence the proofreader never returned (dropped id, or batches
+			// that failed all rounds) keeps its raw translation as its proofread
+			// text: shipping it unproofread is right, and freezing that decision
+			// keeps the align phase and every later run consistent.
+			frozen := p.freezeUnrepaired(needRp, target)
+			if frozen > 0 {
+				fmt.Printf("[%s] %d sentences kept their unproofread text\n", target, frozen)
+			}
+		}
+	}
+	if _, _, needAl, _, _ = p.pendingTwoPhase(sentences, target, false); len(needAl) > 0 {
 		if p.EmbAligner != nil && (p.AlignMode == AlignEmb || p.AlignMode == AlignHybrid) {
 			needAl = p.embedAlign(ctx, needAl, target)
 		}
@@ -310,7 +384,6 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 // EmbQMin) are returned for the LLM align pass; in emb mode nothing is
 // returned and gate-rejected sentences ship as aligned-by-embedding anyway.
 func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) (leftover []item) {
-	model := p.cacheModel()
 	var dict *lexcheck.Dict
 	if p.LexDicts != nil {
 		dict = p.LexDicts(target)
@@ -339,7 +412,7 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 		next = end
 		preps := make([]prep, 0, end-start)
 		for _, it := range items[start:end] {
-			raw, ok := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, model))
+			raw, ok := cache.Read(p.CacheDir, p.textKey(it.s.Src, target))
 			if !ok || strings.TrimSpace(raw.Text) == "" {
 				step()
 				continue // no raw translation to align; ships via the raw fallback
@@ -476,10 +549,12 @@ func (p *Pipeline) rejectEmbedded(dict *lexcheck.Dict, s *tbook.Sentence, tr tbo
 }
 
 // pendingTwoPhase splits not-yet-final sentences (de-duped) into the translate
-// set (no raw translation cached) and the align set (translated, not aligned).
-// With force, every sentence goes to the translate set regardless of cache.
-func (p *Pipeline) pendingTwoPhase(sentences []*tbook.Sentence, target string, force bool) (needTr, needAl []item, nUnique, cached int) {
-	model := p.cacheModel()
+// set (no raw translation cached), the repair set (translated, not yet
+// proofread — empty unless Repair is on) and the align set (text ready, not
+// aligned). With force, every sentence goes to the translate set regardless of
+// cache.
+func (p *Pipeline) pendingTwoPhase(sentences []*tbook.Sentence, target string, force bool) (needTr, needRp, needAl []item, nUnique, cached int) {
+	model, raw := p.cacheModel(), p.rawModel()
 	seen := map[string]bool{}
 	for _, s := range sentences {
 		key := cache.Key(s.Src, p.Source, target, model)
@@ -496,13 +571,21 @@ func (p *Pipeline) pendingTwoPhase(sentences []*tbook.Sentence, target string, f
 					continue
 				}
 			}
-			trKey := cache.TrKey(s.Src, p.Source, target, model)
+			trKey := cache.TrKey(s.Src, p.Source, target, raw)
 			if tr, ok := cache.Read(p.CacheDir, trKey); ok {
 				if suspiciousTranslation(tr.Text) {
 					// A leaked-token artifact slipped into an earlier run's raw
 					// translation — drop it and re-translate.
 					cache.Remove(p.CacheDir, trKey)
 				} else {
+					// Alignable once the text the align pass will consume exists:
+					// the proofread text with repair on, the raw one without.
+					if p.Repair {
+						if _, ok := cache.Read(p.CacheDir, p.textKey(s.Src, target)); !ok {
+							needRp = append(needRp, item{key: key, s: s})
+							continue
+						}
+					}
 					needAl = append(needAl, item{key: key, s: s})
 					continue
 				}
@@ -510,14 +593,50 @@ func (p *Pipeline) pendingTwoPhase(sentences []*tbook.Sentence, target string, f
 		}
 		needTr = append(needTr, item{key: key, s: s})
 	}
-	return needTr, needAl, len(seen), cached
+	return needTr, needRp, needAl, len(seen), cached
+}
+
+// doneKey is the cache entry whose existence means a phase finished a sentence:
+// the raw translation for translate, the proofread text for repair, the final
+// aligned entry for align.
+func (p *Pipeline) doneKey(it item, target string, ph phase) string {
+	switch ph {
+	case phaseTranslate:
+		return cache.TrKey(it.s.Src, p.Source, target, p.rawModel())
+	case phaseRepair:
+		return cache.RepairKey(it.s.Src, p.Source, target, p.rawModel())
+	default:
+		return it.key
+	}
+}
+
+// freezeUnrepaired copies the raw translation into the proofread namespace for
+// every sentence the repair phase did not produce, and returns how many. Without
+// it those sentences would have no text for the align pass and would be retried
+// as pending on every later run, forever.
+func (p *Pipeline) freezeUnrepaired(items []item, target string) int {
+	raw := p.rawModel()
+	frozen := 0
+	for _, it := range items {
+		rpKey := cache.RepairKey(it.s.Src, p.Source, target, raw)
+		if _, ok := cache.Read(p.CacheDir, rpKey); ok {
+			continue
+		}
+		tr, ok := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, raw))
+		if !ok || strings.TrimSpace(tr.Text) == "" {
+			continue // never translated either; the raw fallback reports it
+		}
+		if err := cache.Write(p.CacheDir, rpKey, tr); err == nil {
+			frozen++
+		}
+	}
+	return frozen
 }
 
 // runPhase runs one phase's batches with the dropped-sentence retry loop. A
 // sentence is "done" for the translate phase when its raw translation is cached,
 // for the align phase when its final alignment is cached.
 func (p *Pipeline) runPhase(ctx context.Context, system string, items []item, target string, ph phase) error {
-	model := p.cacheModel()
 	remaining := items
 	p.mu.Lock()
 	p.progTarget, p.progTotal = target, len(items)
@@ -544,11 +663,7 @@ func (p *Pipeline) runPhase(ctx context.Context, system string, items []item, ta
 		}
 		var still []item
 		for _, it := range remaining {
-			doneKey := it.key
-			if ph == phaseTranslate {
-				doneKey = cache.TrKey(it.s.Src, p.Source, target, model)
-			}
-			if _, ok := cache.Read(p.CacheDir, doneKey); !ok {
+			if _, ok := cache.Read(p.CacheDir, p.doneKey(it, target, ph)); !ok {
 				still = append(still, it)
 			}
 		}
@@ -617,18 +732,13 @@ func (p *Pipeline) phaseBatches(ctx context.Context, system string, items []item
 // dropped (the judge learned this first), and ids are echoed in BOTH request
 // and reply — at batch 16 the hex keys alone were ~30% of translate tokens.
 func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, target string, ph phase, bar *progressbar.ProgressBar) error {
-	model := p.cacheModel()
 	ctx = WithPhase(ctx, ph.String())
 	// Progress-bar statistics: a sentence counts as done when its phase's cache
 	// entry exists (the same check the round loop uses).
 	defer func() {
 		successCount := 0
 		for _, it := range batch {
-			doneKey := it.key
-			if ph == phaseTranslate {
-				doneKey = cache.TrKey(it.s.Src, p.Source, target, model)
-			}
-			if _, ok := cache.Read(p.CacheDir, doneKey); ok {
+			if _, ok := cache.Read(p.CacheDir, p.doneKey(it, target, ph)); ok {
 				successCount++
 			}
 		}
@@ -667,13 +777,54 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 			if text = strings.TrimSpace(text); text == "" || suspiciousTranslation(text) {
 				continue // dropped/artifact output — retried next round
 			}
-			_ = cache.Write(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, model),
+			_ = cache.Write(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, p.rawModel()),
 				tbook.Translation{Text: text})
-			// The final aligned entry is DERIVED from the raw translation just
-			// replaced — drop it or the align phase would skip the sentence and
-			// FillFromCache would keep serving the stale text (this is how
-			// escalated sentences used to ship with the old model's content).
+			// The proofread text and the final aligned entry are both DERIVED
+			// from the raw translation just replaced — drop them or the later
+			// phases would skip the sentence and FillFromCache would keep serving
+			// the stale text (this is how escalated sentences used to ship with
+			// the old model's content).
+			if p.Repair {
+				cache.Remove(p.CacheDir, cache.RepairKey(it.s.Src, p.Source, target, p.rawModel()))
+			}
 			cache.Remove(p.CacheDir, it.key)
+		}
+		return nil
+	}
+
+	if ph == phaseRepair {
+		inputs := make([]repairInput, 0, len(batch))
+		for i, it := range batch {
+			raw, ok := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, p.rawModel()))
+			if !ok || strings.TrimSpace(raw.Text) == "" {
+				continue // nothing to proofread; freezeUnrepaired handles the gap
+			}
+			inputs = append(inputs, repairInput{ID: strconv.Itoa(i + 1), Src: it.s.Src,
+				Tr: strings.TrimSpace(raw.Text)})
+		}
+		if len(inputs) == 0 {
+			return nil
+		}
+		userJSON, err := jsonx.Marshal(inputs)
+		if err != nil {
+			return nil
+		}
+		out, err := p.Client.TranslateText(ctx, system, string(userJSON))
+		if err != nil {
+			p.noteErr(err)
+			return abortOnly(err)
+		}
+		for id, text := range out {
+			it, ok := byID(id)
+			if !ok {
+				continue
+			}
+			if text = strings.TrimSpace(text); text == "" || suspiciousTranslation(text) {
+				continue // dropped/artifact output — retried next round
+			}
+			_ = cache.Write(p.CacheDir, cache.RepairKey(it.s.Src, p.Source, target, p.rawModel()),
+				tbook.Translation{Text: text})
+			cache.Remove(p.CacheDir, it.key) // stale alignment of the pre-proofread text
 		}
 		return nil
 	}
@@ -681,7 +832,7 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 	// align phase
 	inputs := make([]alignInput, len(batch))
 	for i, it := range batch {
-		tr, _ := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, model))
+		tr, _ := cache.Read(p.CacheDir, p.textKey(it.s.Src, target))
 		inputs[i] = alignInput{ID: strconv.Itoa(i + 1), Src: it.s.Src, Words: numberedWords(it.s),
 			Tr: ensureListPrefix(it.s.Src, tr.Text)}
 	}
@@ -804,16 +955,26 @@ func CountPendingTranslate(sentences []*tbook.Sentence, targets []string, cacheD
 // empty alignment (translated, no highlights) — better than shipping it
 // untranslated; sentences with neither get an empty translation. Returns the
 // count of (sentence,target) pairs found and missing.
-func FillFromCache(sentences []*tbook.Sentence, targets []string, cacheDir, source, model string) (found, missing int) {
+// The final entry lives under finalModel (which carries the repair marker when
+// the run proofreads); the raw and proofread texts live under rawModel, so the
+// fallback finds them whether or not repair is on.
+func FillFromCache(sentences []*tbook.Sentence, targets []string, cacheDir, source, finalModel,
+	rawModel string, repaired bool) (found, missing int) {
+	textKey := func(src, target string) string {
+		if repaired {
+			return cache.RepairKey(src, source, target, rawModel)
+		}
+		return cache.TrKey(src, source, target, rawModel)
+	}
 	for _, s := range sentences {
 		for _, target := range targets {
-			key := cache.Key(s.Src, source, target, model)
+			key := cache.Key(s.Src, source, target, finalModel)
 			if tr, ok := cache.Read(cacheDir, key); ok && !suspiciousTranslation(tr.Text) {
 				s.Tr[target] = tr
 				found++
 				continue
 			}
-			if raw, ok := cache.Read(cacheDir, cache.TrKey(s.Src, source, target, model)); ok &&
+			if raw, ok := cache.Read(cacheDir, textKey(s.Src, target)); ok &&
 				raw.Text != "" && !suspiciousTranslation(raw.Text) {
 				s.Tr[target] = tbook.Translation{Text: ensureListPrefix(s.Src, raw.Text), Align: []tbook.AlignChunk{}}
 				found++

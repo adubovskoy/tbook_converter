@@ -71,7 +71,7 @@ func run(path, src, tgt, model, judgeModel, cacheDir, lexDir string, batch, alig
 	if err := pipe.Run(ctx, sentences, []string{tgt}); err != nil {
 		return err
 	}
-	found, missing := translate.FillFromCache(sentences, []string{tgt}, cacheDir, src, model)
+	found, missing := translate.FillFromCache(sentences, []string{tgt}, cacheDir, src, model, model, false)
 	fmt.Printf("filled %d from cache (%d missing)\n", found, missing)
 
 	dict, err := lexcheck.Load(lexDir, src, tgt)
