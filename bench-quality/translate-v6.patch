@@ -1,0 +1,19 @@
+diff --git i/internal/translate/prompt.go w/internal/translate/prompt.go
+index 83ed2ba..fe1352f 100644
+--- i/internal/translate/prompt.go
++++ w/internal/translate/prompt.go
+@@ -42,6 +42,14 @@ For EACH sentence, write a faithful, natural literary {TGT} translation of src:
+   the one that MIRRORS the source: give each content word an explicit {TGT}
+   counterpart, keep the source clause order, keep metaphors as images. Do not
+   paraphrase freely; split or merge clauses only where {TGT} grammar demands it.
++- IDIOMS, PHRASAL VERBS, SLANG, FIXED EXPRESSIONS: translate the EXPRESSION, never
++  its words. Render it with a {TGT} expression of the same meaning AND the same
++  register (idiom→idiom, slang→slang, vulgar→vulgar) where one exists; otherwise
++  say the plain meaning in matching register. A word-by-word rendering that is not
++  a real {TGT} expression is a MISTRANSLATION — the reader would learn nonsense
++  (src "kicked the bucket" must never become {TGT} words about kicking a bucket).
++- The MIRROR preference above applies to ordinary phrasing ONLY — never inside an
++  idiom or fixed expression, and never at the cost of grammatical, natural {TGT}.
+ - Match the source register and tone: slang stays slang, formal stays formal.
+ - Output PURE {TGT} — never leave {SRC} words in the translation.
+ 

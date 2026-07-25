@@ -24,3 +24,6 @@ lexicons/
 
 # Python bytecode
 __pycache__/
+
+# Research arms: throwaway convert binaries and produced books (see issue #8)
+/bench-quality/convert-*
