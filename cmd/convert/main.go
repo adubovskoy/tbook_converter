@@ -320,6 +320,17 @@ func convert(cfg *config.Config, runStart time.Time) error {
 				defer aligner.Close()
 				pipe.EmbAligner = aligner
 				pipe.LexDicts = lexDictLoader(cfg)
+				// EXPERIMENTAL (research-only): expression spans for the
+				// aligner's unit-glue step. Off unless --units-file is given.
+				if cfg.UnitsFile != "" {
+					units, uerr := embalign.LoadUnitsFile(cfg.UnitsFile)
+					if uerr != nil {
+						return uerr
+					}
+					pipe.Units = units
+					fmt.Printf("EXPERIMENTAL unit spans from %s (aligner glue: EMBALIGN_UNIT_GLUE=%q)\n",
+						cfg.UnitsFile, os.Getenv("EMBALIGN_UNIT_GLUE"))
+				}
 			case cfg.AlignModeExplicit:
 				return err
 			default:

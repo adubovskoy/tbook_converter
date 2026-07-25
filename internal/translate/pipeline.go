@@ -61,6 +61,20 @@ type BatchWordAligner interface {
 	AlignBatch(srcs, tgts [][]string) ([][][2]int, error)
 }
 
+// UnitBatchWordAligner is the EXPERIMENTAL unit-aware batched path (satisfied
+// by *embalign.Aligner): the same request plus per-sentence expression spans
+// (source word ranges [start, end)) for the child's unit-glue step. Used only
+// when Pipeline.Units is set; without it the plain BatchWordAligner path runs.
+type UnitBatchWordAligner interface {
+	AlignBatchUnits(srcs, tgts [][]string, units [][][2]int) ([][][2]int, error)
+}
+
+// UnitWordAligner is the per-sentence twin of UnitBatchWordAligner, for the
+// fallback path (non-batch aligner, or a child that rejected the batch line).
+type UnitWordAligner interface {
+	AlignUnits(srcWords, tgtWords []string, units [][2]int) ([][2]int, error)
+}
+
 // embBatchSize is the embedding-aligner request size. The child encodes each
 // request in length-sorted padded sub-batches of 32; a large request gives the
 // sort enough spread to group similar lengths (measured ~1.9x over unsorted on
@@ -91,6 +105,15 @@ type Pipeline struct {
 	EmbAligner WordAligner
 	LexDicts   func(target string) *lexcheck.Dict
 	EmbQMin    float64
+
+	// Units is EXPERIMENTAL (research-only, nil in production): a lookup from a
+	// source sentence and its word spans to the spans of known multi-word
+	// expressions in it, as source word ranges [start, end). When non-nil and
+	// the aligner is unit-aware, they ride along with each align request so the
+	// child can glue every word of an expression onto the target group the
+	// expression rendered as (see embalign.LoadUnitsFile and the
+	// EMBALIGN_UNIT_GLUE gate in tools/embalign.py).
+	Units func(src string, words [][2]int) [][2]int
 
 	// Progress, when non-nil, receives machine-readable NDJSON progress
 	// events (--progress-file) alongside the human bars.
@@ -329,9 +352,16 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 		}
 		srcs := make([][]string, len(preps))
 		tgts := make([][]string, len(preps))
+		var units [][][2]int // EXPERIMENTAL: nil unless p.Units is set
+		if p.Units != nil {
+			units = make([][][2]int, len(preps))
+		}
 		for i, pr := range preps {
 			srcs[i] = embalign.WordStrings(pr.it.s.Src, pr.it.s.Words)
 			tgts[i] = embalign.WordStrings(pr.text, pr.trWords)
+			if units != nil {
+				units[i] = p.Units(pr.it.s.Src, pr.it.s.Words)
+			}
 		}
 
 		// Batched fast path; per-sentence fallback covers non-batch aligners and
@@ -339,7 +369,15 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 		// result — failure or death mid-chunk — gates that sentence.
 		var results [][][2]int
 		if canBatch {
-			res, err := batcher.AlignBatch(srcs, tgts)
+			var res [][][2]int
+			var err error
+			// EXPERIMENTAL unit-aware call when spans are available and the
+			// aligner understands them; otherwise the production call verbatim.
+			if ub, ok := batcher.(UnitBatchWordAligner); ok && units != nil {
+				res, err = ub.AlignBatchUnits(srcs, tgts, units)
+			} else {
+				res, err = batcher.AlignBatch(srcs, tgts)
+			}
 			switch {
 			case err == nil:
 				results = res
@@ -351,8 +389,15 @@ func (p *Pipeline) embedAlign(ctx context.Context, items []item, target string) 
 		}
 		if results == nil && !dead {
 			results = make([][][2]int, len(preps))
+			single, unitCapable := p.EmbAligner.(UnitWordAligner)
 			for i := range preps {
-				pairs, err := p.EmbAligner.Align(srcs[i], tgts[i])
+				var pairs [][2]int
+				var err error
+				if unitCapable && units != nil {
+					pairs, err = single.AlignUnits(srcs[i], tgts[i], units[i])
+				} else {
+					pairs, err = p.EmbAligner.Align(srcs[i], tgts[i])
+				}
 				if err != nil {
 					if errors.Is(err, embalign.ErrDead) {
 						dead = true
