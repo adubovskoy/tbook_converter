@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,22 +83,62 @@ func BuildGlossary(ctx context.Context, c *Client, cacheDir string, sentences []
 	return entries, GlossHash(entries), nil
 }
 
-// LoadGlossaryFile reads a user-editable glossary JSON file — the format
-// WriteGlossaryFile produces: an array of {"src","tgt"} entries — trimming
-// and dropping any entry left with an empty src or tgt (e.g. a term the user
-// blanked out to stop enforcing it). Returns an error if path doesn't exist
-// or isn't valid JSON of that shape.
-func LoadGlossaryFile(path string) ([]GlossEntry, error) {
+// GlossaryScope identifies the book and language pair a glossary was built
+// for. It mirrors BuildGlossary's cache key (minus the model, which does not
+// change what a term *means*): a glossary is only reusable for the same book
+// translated into the same language.
+type GlossaryScope struct {
+	Source    string `json:"source"`
+	Target    string `json:"target"`
+	Title     string `json:"title"`
+	Author    string `json:"author"`
+	Sentences int    `json:"sentences"`
+}
+
+// glossaryFile is the on-disk shape of the user-editable sidecar. The scope
+// fields are what make reuse safe — without them a file written for en→ru
+// would be enforced verbatim on a later en→es run of the same output path
+// (the add-a-language flow defaults --out to the input .tbook), and a
+// glossary built under --limit-chapters would silently carry into the full
+// book.
+type glossaryFile struct {
+	GlossaryScope
+	Terms []GlossEntry `json:"terms"`
+}
+
+// ErrGlossaryScope reports a sidecar that belongs to a different book or
+// language pair than the current run. Callers rebuild instead of reusing it.
+var ErrGlossaryScope = errors.New("glossary file was built for a different book or language pair")
+
+// GlossaryFilePath is the user-editable glossary sidecar for an output
+// .tbook. The language pair is part of the name so adding a language to an
+// existing book gets its own file instead of clobbering (or inheriting) the
+// previous one.
+func GlossaryFilePath(out string, scope GlossaryScope) string {
+	return fmt.Sprintf("%s.glossary.%s-%s.json", out, scope.Source, scope.Target)
+}
+
+// LoadGlossaryFile reads a user-editable glossary sidecar — the format
+// WriteGlossaryFile produces — trimming and dropping any entry left with an
+// empty src or tgt (e.g. a term the user blanked out to stop enforcing it).
+// Returns fs.ErrNotExist when there is no file yet, ErrGlossaryScope when the
+// file belongs to another book or language pair, and a parse error otherwise;
+// in every case the caller falls back to building the glossary.
+func LoadGlossaryFile(path string, scope GlossaryScope) ([]GlossEntry, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var entries []GlossEntry
-	if err := json.Unmarshal(b, &entries); err != nil {
+	var f glossaryFile
+	if err := json.Unmarshal(b, &f); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	out := entries[:0]
-	for _, e := range entries {
+	if f.GlossaryScope != scope {
+		return nil, fmt.Errorf("%w: it holds %s→%s for %q by %s, %d sentences", ErrGlossaryScope,
+			f.Source, f.Target, f.Title, f.Author, f.Sentences)
+	}
+	out := make([]GlossEntry, 0, len(f.Terms))
+	for _, e := range f.Terms {
 		e.Src, e.Tgt = strings.TrimSpace(e.Src), strings.TrimSpace(e.Tgt)
 		if e.Src != "" && e.Tgt != "" {
 			out = append(out, e)
@@ -106,13 +147,13 @@ func LoadGlossaryFile(path string) ([]GlossEntry, error) {
 	return out, nil
 }
 
-// WriteGlossaryFile writes entries as pretty-printed JSON to path so a user
-// can open and edit them (see --only-glossary) before translation runs.
-func WriteGlossaryFile(path string, entries []GlossEntry) error {
+// WriteGlossaryFile writes the glossary as pretty-printed JSON to path so a
+// user can open and edit it (see --only-glossary) before translation runs.
+func WriteGlossaryFile(path string, scope GlossaryScope, entries []GlossEntry) error {
 	if entries == nil {
 		entries = []GlossEntry{}
 	}
-	b, err := jsonx.MarshalIndent(entries, "  ")
+	b, err := jsonx.MarshalIndent(glossaryFile{GlossaryScope: scope, Terms: entries}, "  ")
 	if err != nil {
 		return err
 	}

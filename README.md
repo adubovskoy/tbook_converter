@@ -38,10 +38,11 @@ A plain run does, in order:
 2. **Glossary** (1 extra call) — recurring terms + proper nouns, enforced in
    every batch so names stay consistent. `--no-glossary` skips it (also needed
    to reuse caches made before glossary became the default). The glossary is
-   written to `<out-base>.glossary.json` next to the output and reused
-   verbatim on every later run — edit it by hand (or run `--only-glossary`
-   first, see below) to control how specific terms/names are rendered before
-   translating.
+   written to `<out>.glossary.<src>-<tgt>.json` next to the output and reused
+   verbatim on every later run of the same book and language pair — edit it by
+   hand (or run `--only-glossary` first, see below) to control how specific
+   terms/names are rendered before translating. Editing it moves the cache
+   namespace, so the affected sentences are re-translated.
 3. **Translate** — batches of 16, 32 requests in parallel.
 4. **Align** — free local LaBSE word alignment (`hybrid` mode); the ~4% of
    sentences the quality gate rejects are re-aligned by the LLM. Without the
@@ -109,11 +110,21 @@ Machine integration (for scripts and services driving the converter):
   Nothing else is written to stdout; parse failures exit non-zero with
   `error: …` on stderr.
 - `--only-glossary` — build (or load) the book glossary, write it to
-  `<out-base>.glossary.json`, open it in your system's default app for
+  `<out>.glossary.<src>-<tgt>.json`, open it in your system's default app for
   `.json` files, then exit — no translation runs. Edit the `tgt` of any entry
-  (or delete an entry to stop enforcing it) and re-run normally; the edited
-  file is picked up verbatim instead of rebuilding the glossary, so the same
-  edits apply to the real translation.
+  under `terms` (or delete an entry to stop enforcing it) and re-run normally;
+  the edited file is picked up verbatim instead of rebuilding the glossary, so
+  the same edits apply to the real translation. Re-running `--only-glossary`
+  just re-opens the file — free, no API key needed. To throw the edits away
+  and go back to the model's glossary, delete the file or add `--force`. This
+  is an interactive flag: it writes no `--progress-file` events, because it
+  produces no `.tbook`.
+
+  The `source`/`target`/`title`/`author`/`sentences` fields at the top of the
+  file scope it to one book and one language pair — a file that doesn't match
+  the current run (a second target language, or a glossary built under
+  `--limit-chapters`) is reported and rebuilt rather than enforced on a book
+  it was never built for. Don't hand-edit them.
 - `--progress-file file.ndjson` (env `PROGRESS_FILE`) — during a real
   conversion, append NDJSON progress events (one JSON per line, flushed per
   write, throttled to ≤ ~2 lines/sec per phase, final line of a phase always
@@ -136,7 +147,7 @@ Content: `--keep-matter`, `--skip-files pat1,pat2`, `--no-images`, `--no-notes`,
 `--skip-citations` (leave bibliographic footnotes untranslated).
 
 Quality: `--no-glossary`, `--only-glossary` (build/edit the glossary, see
-above, then exit), `--no-lexcheck`, `--judge` (semantic verification
+above, then exit; `--force` rebuilds it), `--no-lexcheck`, `--judge` (semantic verification
 report, see below), `--judge-scope` (`flagged` default: suspects + a 5%
 calibration sample — seconds per book | `all`), `--judge-model`,
 `--judge-invalidate`, `--escalate-model` (redo flagged sentences with a
