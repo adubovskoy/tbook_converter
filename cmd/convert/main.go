@@ -15,10 +15,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -95,8 +97,9 @@ func run() error {
 
 	// Machine-readable NDJSON progress events for a supervising process
 	// (--progress-file / PROGRESS_FILE); real conversions only — a --dry-run
-	// must not create the file.
-	if cfg.ProgressFile != "" && !cfg.DryRun {
+	// or --only-glossary produces no .tbook, so it must not create the file
+	// (and must not report a "done" event a supervisor would read as success).
+	if cfg.ProgressFile != "" && !cfg.DryRun && !cfg.OnlyGlossary {
 		progressLog, err = progress.Open(cfg.ProgressFile)
 		if err != nil {
 			return fmt.Errorf("open --progress-file: %w", err)
@@ -212,13 +215,42 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	cacheModel := cfg.Model
 	var glossary []translate.GlossEntry
 
+	// The glossary is a user-editable JSON file alongside the output .tbook
+	// (--only-glossary writes and opens it for editing before any translation
+	// runs). Once it exists, every later run loads it verbatim — edits
+	// included — instead of rebuilding it from the model. The file is scoped
+	// to this book and language pair; one built for another is ignored.
+	wantGlossary := cfg.Glossary || cfg.OnlyGlossary
+	glossScope := translate.GlossaryScope{
+		Source: cfg.Source, Target: cfg.Targets[0],
+		Title: title, Author: author, Sentences: len(sentences),
+	}
+	glossPath := translate.GlossaryFilePath(cfg.Out, glossScope)
+	haveGlossFile := false
+	if wantGlossary && !(cfg.OnlyGlossary && cfg.Force) { // --only-glossary --force: discard and rebuild
+		if entries, lerr := translate.LoadGlossaryFile(glossPath, glossScope); lerr == nil {
+			glossary, haveGlossFile = entries, true
+			// The hash must be known before the pending count below: it
+			// namespaces the translation cache, and a file-supplied glossary
+			// needs no LLM to produce it.
+			cacheModel = translate.CacheKeyModel(cfg.Model, translate.GlossHash(glossary))
+		} else if !errors.Is(lerr, fs.ErrNotExist) {
+			fmt.Printf("Glossary: ignoring %s (%v) — rebuilding\n", glossPath, lerr)
+		}
+	}
+	needsGlossaryBuild := wantGlossary && !haveGlossFile
+
 	// Only the untranslated work needs the LLM; a fully-cached run assembles
 	// offline (resume / re-assemble) without a key or CLI.
 	countPending := func() int {
 		return translate.CountPending(translatable, cfg.Targets, cfg.CacheDir, cfg.Source, cacheModel, cfg.Force)
 	}
-	needAPI := countPending() > 0 || cfg.Glossary || cfg.Judge
-	if cfg.AlignMode == config.AlignEmb && !cfg.Glossary && !cfg.Judge {
+	needAPI := countPending() > 0 || needsGlossaryBuild || cfg.Judge
+	switch {
+	case cfg.OnlyGlossary:
+		// The run stops after the glossary pass: only building one needs the LLM.
+		needAPI = needsGlossaryBuild
+	case cfg.AlignMode == config.AlignEmb && !needsGlossaryBuild && !cfg.Judge:
 		// emb aligns locally: only the translate phase needs the LLM.
 		needAPI = translate.CountPendingTranslate(translatable, cfg.Targets, cfg.CacheDir,
 			cfg.Source, cacheModel, cfg.Force) > 0
@@ -274,17 +306,35 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Glossary pass: build (or load) the book glossary and namespace the cache
-	// with its hash — translations made under a different glossary never mix.
-	if cfg.Glossary {
-		var ghash string
-		glossary, ghash, err = translate.BuildGlossary(ctx, client, cfg.CacheDir, sentences,
-			cfg.Source, cfg.Targets[0], title, author)
-		if err != nil {
-			return fmt.Errorf("glossary: %w", err)
+	// Glossary pass: build the book glossary unless the sidecar already
+	// supplied one (loaded above, along with its cache namespace) — the hash
+	// namespaces the cache so translations made under a different glossary
+	// never mix.
+	if wantGlossary {
+		if needsGlossaryBuild {
+			var ghash string
+			glossary, ghash, err = translate.BuildGlossary(ctx, client, cfg.CacheDir, sentences,
+				cfg.Source, cfg.Targets[0], title, author)
+			if err != nil {
+				return fmt.Errorf("glossary: %w", err)
+			}
+			cacheModel = translate.CacheKeyModel(cfg.Model, ghash)
+			if werr := translate.WriteGlossaryFile(glossPath, glossScope, glossary); werr != nil {
+				fmt.Printf("Glossary: couldn't write %s (%v) — edits won't be picked up next run\n", glossPath, werr)
+			}
+		} else {
+			fmt.Printf("Glossary: using %d term(s) from %s\n", len(glossary), glossPath)
 		}
-		cacheModel = translate.CacheKeyModel(cfg.Model, ghash)
 		fmt.Printf("Glossary: %d enforced terms (cache namespace %s)\n", len(glossary), cacheModel)
+
+		if cfg.OnlyGlossary {
+			fmt.Printf("Edit %s to change how terms are translated, then re-run without --only-glossary to translate.\n", glossPath)
+			fmt.Println("(delete it, or re-run with --only-glossary --force, to rebuild it from the model)")
+			if oerr := openGlossary(glossPath); oerr != nil {
+				fmt.Printf("(couldn't open it automatically: %v — open it yourself)\n", oerr)
+			}
+			return nil
+		}
 	}
 
 	if pending := countPending(); pending > 0 {
@@ -631,6 +681,32 @@ func lexDictLoader(cfg *config.Config) func(target string) *lexcheck.Dict {
 		dicts[target] = d
 		return d
 	}
+}
+
+// openGlossary launches the editor for the glossary sidecar. Indirected
+// through a var so tests can exercise --only-glossary without spawning one.
+var openGlossary = openInDefaultApp
+
+// openInDefaultApp opens path (the glossary JSON, for the user to edit before
+// translating) without blocking on the app closing. It prefers the VS Code
+// CLI when available — a plain OS "open" can silently no-op (Windows with no
+// .json association registered) or, worse, launch a synchronous "how do you
+// want to open this?" resolution that never returns — so it is only the
+// fallback, not the primary mechanism.
+func openInDefaultApp(path string) error {
+	if codeBin, err := exec.LookPath("code"); err == nil {
+		return exec.Command(codeBin, path).Start()
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
+	case "darwin":
+		cmd = exec.Command("open", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	return cmd.Start()
 }
 
 // mergeTargets returns the existing target list followed by any requested
