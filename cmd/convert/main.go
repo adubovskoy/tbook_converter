@@ -124,6 +124,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		cover         []byte
 		images        map[string][]byte
 		notes         map[string]*tbook.Note
+		meta          *tbook.Meta // provenance (§3.4): carried over from a .tbook input
 		outChapters   []tbook.Chapter
 		sentences     []*tbook.Sentence // chapter prose + figure captions + table cells
 		noteSents     []*tbook.Sentence
@@ -139,7 +140,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		}
 		cfg.Source = rb.Source // the archive is authoritative for the source language
 		title, author = rb.Title, rb.Author
-		cover, images, notes = rb.Cover, rb.Images, rb.Notes
+		cover, images, notes, meta = rb.Cover, rb.Images, rb.Notes, rb.Meta
 		if cfg.LimitChapters > 0 && cfg.LimitChapters < len(rb.Chapters) {
 			rb.Chapters = rb.Chapters[:cfg.LimitChapters]
 		}
@@ -464,10 +465,19 @@ func convert(cfg *config.Config, runStart time.Time) error {
 
 	fmt.Printf("Writing %s ...\n", cfg.Out)
 	progressLog.Update("assemble", "", 0, 1)
+	// Stamp this run into the file's provenance (§3.4). Appended, not replaced:
+	// a .tbook read back above keeps every earlier run — and any bookkeeping
+	// another tool left in meta — while a re-assembly with unchanged settings
+	// collapses into the previous record instead of piling up.
+	if meta == nil {
+		meta = &tbook.Meta{}
+	}
+	meta.AppendRun(metaRun(cfg, cfg.Targets, len(glossary), runStart))
 	out := &tbook.Book{
 		Title: title, Author: author,
 		Source: cfg.Source, Targets: writeTargets,
 		Cover: cover, Images: images, Notes: notes,
+		Meta:     meta,
 		Chapters: outChapters,
 	}
 	if err := tbook.Write(cfg.Out, out); err != nil {

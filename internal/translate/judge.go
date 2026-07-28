@@ -24,13 +24,15 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// judgeVersion namespaces judge verdicts on disk; bump when the judge prompt
-// or verdict semantics change. j3 = j1's alignment rules plus an explicit
+// JudgeVersion namespaces judge verdicts on disk, and is recorded as the judge
+// pass's prompt version in a .tbook's provenance metadata (spec §3.4); bump
+// when the judge prompt or verdict semantics change. j3 = j1's alignment rules
+// plus an explicit
 // verdict-shape example (cheap models otherwise answer with an array) and
 // "lenient about granularity". An intermediate j2 that flagged only
 // reader-visible defects zeroed the cheap judge's recall — leniency wording
 // must not give a weak judge an excuse to approve everything.
-const judgeVersion = "j3"
+const JudgeVersion = "j3"
 
 // Verdict is the judge's decision for one (sentence, target).
 type Verdict struct {
@@ -245,7 +247,7 @@ func alignPairs(s *tbook.Sentence, tr tbook.Translation) [][2]string {
 
 func judgeKey(model, source, target, src, trText string, pairs [][2]string) string {
 	pj, _ := json.Marshal(pairs)
-	raw := judgeVersion + "|" + model + "|" + source + "|" + target + "|" + src + "|" + trText + "|" + string(pj)
+	raw := JudgeVersion + "|" + model + "|" + source + "|" + target + "|" + src + "|" + trText + "|" + string(pj)
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
 }

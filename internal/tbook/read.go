@@ -58,6 +58,7 @@ func Read(path string) (*Book, error) {
 		Author:  man.Author,
 		Source:  man.SourceLang,
 		Targets: man.TargetLangs,
+		Meta:    man.Meta, // carried over so a rewrite appends, never discards (§3.4)
 	}
 
 	if man.Cover != nil {

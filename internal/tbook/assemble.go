@@ -38,6 +38,7 @@ func Write(outPath string, b *Book) error {
 		Author:        b.Author,
 		SourceLang:    b.Source,
 		TargetLangs:   b.Targets,
+		Meta:          b.Meta, // provenance, §3.4; omitted when nil
 		Chapters:      make([]ChapterRef, 0, len(b.Chapters)),
 	}
 	if b.Cover != nil {

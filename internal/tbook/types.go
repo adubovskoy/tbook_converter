@@ -125,14 +125,17 @@ type Chapter struct {
 
 // Book is the fully assembled document handed to Write: metadata plus chapters,
 // book-level notes (id → note) and image bytes (archive entry name → bytes).
+// Meta is the optional provenance object (spec §3.4); Read carries an existing
+// one over so Write can append this run to it.
 type Book struct {
-	Title   string
-	Author  string
-	Source  string
-	Targets []string
-	Cover   []byte            // nil if none
-	Images  map[string][]byte // "images/imgN.ext" → bytes; nil/empty if none
-	Notes   map[string]*Note  // note id → body; nil/empty if none
+	Title    string
+	Author   string
+	Source   string
+	Targets  []string
+	Cover    []byte            // nil if none
+	Images   map[string][]byte // "images/imgN.ext" → bytes; nil/empty if none
+	Notes    map[string]*Note  // note id → body; nil/empty if none
+	Meta     *Meta             // nil = no provenance metadata
 	Chapters []Chapter
 }
 
@@ -145,6 +148,7 @@ type Manifest struct {
 	TargetLangs   []string     `json:"targetLangs"`
 	Cover         *string      `json:"cover"`
 	Notes         *string      `json:"notes,omitempty"`
+	Meta          *Meta        `json:"meta,omitempty"`
 	Chapters      []ChapterRef `json:"chapters"`
 }
 

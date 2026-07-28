@@ -221,6 +221,32 @@ Full details: [the speed report](https://github.com/adubovskoy/tbook_converter/i
 [`../doc/specs/tbook-format.md`](../doc/specs/tbook-format.md) (format),
 [`../doc/specs/article.md`](../doc/specs/article.md) (design history).
 
+## Provenance stamped into the file
+
+Every assembled `.tbook` carries a run record in `manifest.meta`
+([spec §3.4](../doc/specs/tbook-format.md#34-meta--provenance-and-service-metadata)):
+converter version and commit, the provider, the model of each pass
+(translate / align / repair / judge / escalate / embed), each pass's prompt-contract
+version, and the run's settings — so months later you can tell what produced a
+book. Reading a `.tbook` back (adding a language) appends a record instead of
+replacing the history; a re-run with unchanged settings only moves `updatedAt`.
+
+No credentials, hosts, or paths go in there — the spec forbids it and a `.tbook`
+gets shared. Inspect it with:
+
+```bash
+unzip -p book.tbook manifest.json | jq .meta
+```
+
+The version comes from `internal/buildinfo`, `"dev"` unless stamped at build time:
+
+```bash
+go build -ldflags "-X github.com/dimando/reader/converter/internal/buildinfo.Version=1.5.1" \
+  -o convert ./cmd/convert
+```
+
+The commit needs no flag — Go embeds the VCS revision automatically.
+
 ## Ship it
 
 ```bash
@@ -235,6 +261,7 @@ The app also imports any `.tbook` at runtime via its file picker.
 cmd/convert        CLI entrypoint (flags, orchestration, --dry-run)
 cmd/driftdemo      microscope: pipeline + lexcheck + judge on a small passage
 cmd/lexeval        lexcheck benchmark (synthetic drift injection on a .tbook)
+internal/buildinfo producer identity (version, VCS commit) for manifest.meta
 internal/config    .env + flag resolution
 internal/embalign  local embedding word aligner (tools/embalign.py subprocess)
 internal/epub      EPUB → chapters of paragraph text
