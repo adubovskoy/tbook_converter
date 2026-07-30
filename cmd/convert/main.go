@@ -353,6 +353,10 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		fmt.Printf("Translating %s→%s via %s ...\n", cfg.Source, strings.Join(cfg.Targets, ","), via)
 		if cfg.Repair {
 			fmt.Println("Proofread pass ON (one extra LLM pass over every translation before aligning).")
+			if cfg.RepairContext > 0 {
+				fmt.Printf("  with --context %d: each item carries the %d preceding sentences "+
+					"(better fixes, ~3x this phase's time).\n", cfg.RepairContext, cfg.RepairContext)
+			}
 		}
 		pipe := &translate.Pipeline{
 			Client: client, CacheDir: cfg.CacheDir, Source: cfg.Source,
@@ -360,7 +364,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 			Concurrency: cfg.Concurrency,
 			Force:       cfg.Force,
 			Glossary:    glossary, CacheModel: cacheModel,
-			Repair:    cfg.Repair,
+			Repair: cfg.Repair, RepairContext: cfg.RepairContext,
 			AlignMode: cfg.AlignMode, EmbQMin: cfg.EmbQMin,
 			Progress: progressLog,
 		}
@@ -411,7 +415,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	// Fill from cache + assemble. Citation sentences are filled too (they may
 	// be cached from earlier runs); missing ones stay empty.
 	found, missing := translate.FillFromCache(allSents, cfg.Targets, cfg.CacheDir, cfg.Source,
-		finalModel(cfg, cacheModel), cacheModel, cfg.Repair)
+		finalModel(cfg, cacheModel), cacheModel, repairModel(cfg, cacheModel))
 	fmt.Printf("Filled %d translations from cache (%d missing).\n", found, missing)
 
 	// Verification passes. Lexcheck is the free, offline gate: a bilingual
@@ -793,9 +797,18 @@ func runLexcheck(cfg *config.Config, sentences []*tbook.Sentence) []string {
 // proofread text must never answer for an unrepaired run.
 func finalModel(cfg *config.Config, cacheModel string) string {
 	if cfg.Repair {
-		return translate.RepairCacheModel(cacheModel)
+		return translate.RepairCacheModel(cacheModel, cfg.RepairContext)
 	}
 	return cacheModel
+}
+
+// repairModel is the cache namespace of the PROOFREAD text — empty when the run
+// does not proofread, so the cache fallback reads the raw translation instead.
+func repairModel(cfg *config.Config, cacheModel string) string {
+	if !cfg.Repair {
+		return ""
+	}
+	return translate.RepairTextCacheModel(cacheModel, cfg.RepairContext)
 }
 
 func subsetBySrc(sentences []*tbook.Sentence, srcs []string) []*tbook.Sentence {
@@ -832,7 +845,7 @@ func escalateRun(ctx context.Context, cfg *config.Config, glossary []translate.G
 		return err
 	}
 	found, missing := translate.FillFromCache(subset, cfg.Targets, cfg.CacheDir, cfg.Source,
-		finalModel(cfg, cacheModel), cacheModel, cfg.Repair)
+		finalModel(cfg, cacheModel), cacheModel, repairModel(cfg, cacheModel))
 	fmt.Printf("Escalation done: %d refreshed (%d missing).\n", found, missing)
 	return nil
 }
@@ -930,7 +943,7 @@ func reverifyEscalated(ctx context.Context, cfg *config.Config, glossary []trans
 		}
 	}
 	translate.FillFromCache(subsetBySrc(subset, still), cfg.Targets, cfg.CacheDir, cfg.Source,
-		finalModel(cfg, cacheModel), cacheModel, cfg.Repair)
+		finalModel(cfg, cacheModel), cacheModel, repairModel(cfg, cacheModel))
 	path := cfg.Out + ".unverified.json"
 	_ = translate.WriteFlagged(path, still)
 	fmt.Printf("Escalation left %d sentences unverified (%d ship raw with no highlights, "+

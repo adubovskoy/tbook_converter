@@ -15,7 +15,7 @@ func clearProviderEnv(t *testing.T) {
 		"LLAMACPP_MODEL", "LLAMACPP_BASE_URL", "LLAMACPP_API_KEY",
 		"GONKA_MODEL", "GONKA_BASE_URL", "GONKA_API_KEY",
 		"OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "CONCURRENCY", "BATCH_SIZE", "MAX_RETRIES", "REQUEST_TIMEOUT_SEC",
-		"JUDGE_MODEL", "ESCALATE_MODEL", "ALIGN_MODE",
+		"JUDGE_MODEL", "ESCALATE_MODEL", "ALIGN_MODE", "REPAIR_CONTEXT",
 	} {
 		t.Setenv(k, "")
 	}
@@ -196,6 +196,49 @@ func TestRepairEnvOverridesGonkaDefault(t *testing.T) {
 	}
 	if cfg.Repair {
 		t.Error("Repair = true, want false (NO_REPAIR=1 must beat the gonka default)")
+	}
+}
+
+// TestRepairContext pins the accepted values of --context: off by default, 2
+// for neighbour context, and a hard refusal of 1 — measured worse than no
+// context at all, so it must never reach a book by accident.
+func TestRepairContext(t *testing.T) {
+	clearProviderEnv(t)
+	cases := []struct {
+		name    string
+		args    []string
+		env     string
+		want    int
+		wantErr bool
+	}{
+		{name: "off by default", args: []string{"book.epub"}, want: 0},
+		{name: "flag", args: []string{"book.epub", "--context", "2"}, want: 2},
+		{name: "env", args: []string{"book.epub"}, env: "2", want: 2},
+		{name: "flag beats env", args: []string{"book.epub", "--context", "0"}, env: "2", want: 0},
+		{name: "one rejected", args: []string{"book.epub", "--context", "1"}, wantErr: true},
+		{name: "negative rejected", args: []string{"book.epub", "--context", "-2"}, wantErr: true},
+		{name: "env one rejected", args: []string{"book.epub"}, env: "1", wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("REPAIR_CONTEXT", c.env)
+			cfg, err := Load(c.args)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("Load: want error, got RepairContext = %d", cfg.RepairContext)
+				}
+				if !strings.Contains(err.Error(), "--context") {
+					t.Errorf("error %q should name the flag", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.RepairContext != c.want {
+				t.Errorf("RepairContext = %d, want %d", cfg.RepairContext, c.want)
+			}
+		})
 	}
 }
 

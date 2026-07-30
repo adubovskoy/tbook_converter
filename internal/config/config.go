@@ -72,6 +72,7 @@ type Config struct {
 	Glossary        bool   // build a book glossary and enforce it during translation (default on; --no-glossary disables)
 	OnlyGlossary    bool   // build/load the glossary, write it to <out>.glossary.<src>-<tgt>.json and open it for editing, then exit before translating (with Force: rebuild it, discarding edits)
 	Repair          bool   // proofread pass between translate and align (default on for gonka only; --repair/--no-repair override)
+	RepairContext   int    // with the proofread pass: send the N preceding sentences (+ their translations) as read-only context; 0 = off, 2 = measured best, 1 = never (see README)
 	Judge           bool   // run the semantic verification pass after translating
 	JudgeModel      string // model for the judge pass (default: same as Model)
 	JudgeScope      string // "flagged" (default): judge only lexcheck-flagged + low-coverage sentences + a small calibration sample | "all"
@@ -187,6 +188,7 @@ func Load(args []string) (*Config, error) {
 	// --repair / --no-repair override the per-provider default either way.
 	repair := fs.Bool("repair", envBool("REPAIR", false), "proofread each translation before aligning (default: on for gonka, off otherwise)")
 	noRepair := fs.Bool("no-repair", envBool("NO_REPAIR", false), "skip the proofread pass even on gonka")
+	repairContext := fs.Int("context", envInt("REPAIR_CONTEXT", 0), "with the proofread pass: send the N preceding sentences and their translations as read-only context, so it can fix a wrong gender or referent instead of being forbidden to touch it (0 = off; 2 = measured best, ~3x the proofread phase; 1 is WORSE than 0 — see README)")
 	lexiconDir := fs.String("lexicons", envOr("LEXICON_DIR", "lexicons"), "lexicon directory for the drift check")
 	alignMode := fs.String("align-mode", envOr("ALIGN_MODE", AlignHybrid),
 		"alignment pass: hybrid (default: local embedding aligner + LLM fallback for gated sentences) | emb (embedding aligner only) | llm (LLM align pass)")
@@ -261,6 +263,7 @@ func Load(args []string) (*Config, error) {
 		Glossary:        !*noGlossary,
 		OnlyGlossary:    *onlyGlossary,
 		Repair:          *repair && !*noRepair,
+		RepairContext:   *repairContext,
 		Judge:           *judge,
 		JudgeModel:      *judgeModel,
 		JudgeScope:      strings.ToLower(strings.TrimSpace(*judgeScope)),
@@ -329,6 +332,15 @@ func Load(args []string) (*Config, error) {
 	})
 	if cfg.JudgeScope != JudgeScopeAll && cfg.JudgeScope != JudgeScopeFlagged {
 		return nil, fmt.Errorf("unknown --judge-scope %q (want all or flagged)", cfg.JudgeScope)
+	}
+	// One sentence of context is measurably worse than none (80.0% vs 87.1%
+	// precision on the changed sentences): it makes the proofreader confident
+	// enough to touch a character's gender without the evidence to get it
+	// right. Refuse it rather than ship a quieter, worse book; cmd/repair keeps
+	// the knob for measuring the curve.
+	if cfg.RepairContext < 0 || cfg.RepairContext == 1 {
+		return nil, fmt.Errorf("--context %d is not supported (use 0 to proofread blind or 2 for neighbour context; 1 measures worse than 0)",
+			cfg.RepairContext)
 	}
 	// The model default follows the provider, each with its own env var — the
 	// MODEL in .env is an OpenRouter id and must never leak into the claude

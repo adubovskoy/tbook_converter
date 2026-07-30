@@ -104,6 +104,19 @@ type Pipeline struct {
 	// and why it is off where tokens are metered.
 	Repair bool
 
+	// RepairContext (--context N) sends the N preceding sentences with their
+	// translations along with each proofread item, so the pass can settle what
+	// one sentence cannot (a character's gender, a pronoun's referent) instead
+	// of being forbidden to touch it. Costs ~3x the phase's wall time; 0 = off,
+	// and 1 is measured worse than off — see repairSystemPrompt.
+	RepairContext int
+
+	// prevOf supplies the read-only neighbour context of one sentence for the
+	// current target. Built per target before the repair phase (a cache read
+	// per sentence) and read-only while the concurrent batches run; nil when
+	// RepairContext is 0.
+	prevOf func(s *tbook.Sentence) []prevItem
+
 	// Embedding alignment (see AlignLLM/AlignEmb/AlignHybrid). EmbAligner must
 	// be non-nil for the emb/hybrid modes. LexDicts, when non-nil, supplies the
 	// per-target lexcheck dictionary for the hybrid gate (nil dict = Q-only
@@ -184,16 +197,41 @@ func (p *Pipeline) rawModel() string {
 // cacheModel is the namespace of the FINAL aligned entry.
 func (p *Pipeline) cacheModel() string {
 	if p.Repair {
-		return RepairCacheModel(p.rawModel())
+		return RepairCacheModel(p.rawModel(), p.RepairContext)
 	}
 	return p.rawModel()
+}
+
+// repairModel is the namespace of the PROOFREAD TEXT. It is the raw model
+// component (the raw translation is the same with and without proofreading, so
+// toggling repair never re-translates) plus a context marker: proofread with
+// the neighbouring sentences visible is a different text from proofread
+// blind, and the two must never answer for each other.
+func (p *Pipeline) repairModel() string {
+	return RepairTextCacheModel(p.rawModel(), p.RepairContext)
 }
 
 // RepairCacheModel marks a cache-key model component as produced with the
 // proofread pass on. Only the FINAL aligned entry carries it: an alignment of
 // proofread text must never answer for an unrepaired run, while the raw
-// translation the proofreader consumes is the same either way.
-func RepairCacheModel(model string) string { return model + "+rp" }
+// translation the proofreader consumes is the same either way. ctxN carries
+// through so a context-repaired book's alignments stay in their own namespace.
+func RepairCacheModel(model string, ctxN int) string {
+	return model + "+rp" + ctxSuffix(ctxN)
+}
+
+// RepairTextCacheModel is the model component of the proofread TEXT (see
+// Pipeline.repairModel); pass the raw model component and the run's --context.
+func RepairTextCacheModel(rawModel string, ctxN int) string {
+	return rawModel + ctxSuffix(ctxN)
+}
+
+func ctxSuffix(ctxN int) string {
+	if ctxN <= 0 {
+		return ""
+	}
+	return ":c" + strconv.Itoa(ctxN)
+}
 
 // CacheKeyModel returns the cache-key model component for a model and an
 // optional glossary hash (empty hash = plain model).
@@ -218,9 +256,20 @@ type translateInput struct {
 	Src string `json:"src"`
 }
 
-// repairInput carries the existing translation for the proofreader to fix.
+// repairInput carries the existing translation for the proofreader to fix,
+// plus (with --context) the preceding sentences as read-only context.
 type repairInput struct {
-	ID  string `json:"id"`
+	ID   string     `json:"id"`
+	Src  string     `json:"src"`
+	Tr   string     `json:"tr"`
+	Prev []prevItem `json:"prev,omitempty"`
+}
+
+// prevItem is a neighbouring sentence with its translation, sent read-only.
+// The translation is the RAW pass-1 text, not the proofread one: batches run
+// concurrently, so a neighbour's proofread text may or may not exist yet, and
+// a context that depends on scheduling would make the run unreproducible.
+type prevItem struct {
 	Src string `json:"src"`
 	Tr  string `json:"tr"`
 }
@@ -286,7 +335,7 @@ func (ph phase) String() string {
 // live in the RAW model namespace, so toggling repair never re-translates.
 func (p *Pipeline) textKey(src, target string) string {
 	if p.Repair {
-		return cache.RepairKey(src, p.Source, target, p.rawModel())
+		return cache.RepairKey(src, p.Source, target, p.repairModel())
 	}
 	return cache.TrKey(src, p.Source, target, p.rawModel())
 }
@@ -341,7 +390,9 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 	// translate phase, which just produced more proofreadable sentences.
 	if p.Repair {
 		if _, needRp, _, _, _ = p.pendingTwoPhase(sentences, target, false); len(needRp) > 0 {
-			sys := repairSystemPrompt(LangName(p.Source), LangName(target), p.Glossary)
+			p.prevOf = p.buildPrevContext(sentences, target)
+			defer func() { p.prevOf = nil }() // never outlive this target
+			sys := repairSystemPrompt(LangName(p.Source), LangName(target), p.Glossary, p.RepairContext)
 			t0 := time.Now()
 			if err := p.runPhase(ctx, sys, needRp, target, phaseRepair); err != nil {
 				return err
@@ -604,7 +655,7 @@ func (p *Pipeline) doneKey(it item, target string, ph phase) string {
 	case phaseTranslate:
 		return cache.TrKey(it.s.Src, p.Source, target, p.rawModel())
 	case phaseRepair:
-		return cache.RepairKey(it.s.Src, p.Source, target, p.rawModel())
+		return cache.RepairKey(it.s.Src, p.Source, target, p.repairModel())
 	default:
 		return it.key
 	}
@@ -615,10 +666,10 @@ func (p *Pipeline) doneKey(it item, target string, ph phase) string {
 // it those sentences would have no text for the align pass and would be retried
 // as pending on every later run, forever.
 func (p *Pipeline) freezeUnrepaired(items []item, target string) int {
-	raw := p.rawModel()
+	raw, rp := p.rawModel(), p.repairModel()
 	frozen := 0
 	for _, it := range items {
-		rpKey := cache.RepairKey(it.s.Src, p.Source, target, raw)
+		rpKey := cache.RepairKey(it.s.Src, p.Source, target, rp)
 		if _, ok := cache.Read(p.CacheDir, rpKey); ok {
 			continue
 		}
@@ -631,6 +682,44 @@ func (p *Pipeline) freezeUnrepaired(items []item, target string) int {
 		}
 	}
 	return frozen
+}
+
+// buildPrevContext returns the neighbour-context lookup for one target: for a
+// sentence, the RepairContext sentences before it IN BOOK ORDER with their raw
+// translations (a neighbour with no translation is skipped — a source-only
+// neighbour settles nothing). Nil when the run proofreads blind, which is what
+// the context-free prompt is written for. Costs one cache read per sentence,
+// once per target, against a phase that spends minutes in the model.
+func (p *Pipeline) buildPrevContext(sentences []*tbook.Sentence, target string) func(*tbook.Sentence) []prevItem {
+	if p.RepairContext <= 0 {
+		return nil
+	}
+	raw := p.rawModel()
+	prev := make([]prevItem, len(sentences))
+	// Repeated sentences share one item in the pending sets (deduped by cache
+	// key, keeping the first occurrence) — so index by that same first one.
+	idx := make(map[*tbook.Sentence]int, len(sentences))
+	for i, s := range sentences {
+		if _, dup := idx[s]; !dup {
+			idx[s] = i
+		}
+		tr, _ := cache.Read(p.CacheDir, cache.TrKey(s.Src, p.Source, target, raw))
+		prev[i] = prevItem{Src: s.Src, Tr: strings.TrimSpace(tr.Text)}
+	}
+	return func(s *tbook.Sentence) []prevItem {
+		i, ok := idx[s]
+		if !ok || i == 0 {
+			return nil
+		}
+		out := make([]prevItem, 0, p.RepairContext)
+		for j := max(0, i-p.RepairContext); j < i; j++ {
+			if prev[j].Tr == "" {
+				continue
+			}
+			out = append(out, prev[j])
+		}
+		return out
+	}
 }
 
 // runPhase runs one phase's batches with the dropped-sentence retry loop. A
@@ -785,7 +874,7 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 			// the stale text (this is how escalated sentences used to ship with
 			// the old model's content).
 			if p.Repair {
-				cache.Remove(p.CacheDir, cache.RepairKey(it.s.Src, p.Source, target, p.rawModel()))
+				cache.Remove(p.CacheDir, cache.RepairKey(it.s.Src, p.Source, target, p.repairModel()))
 			}
 			cache.Remove(p.CacheDir, it.key)
 		}
@@ -799,8 +888,11 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 			if !ok || strings.TrimSpace(raw.Text) == "" {
 				continue // nothing to proofread; freezeUnrepaired handles the gap
 			}
-			inputs = append(inputs, repairInput{ID: strconv.Itoa(i + 1), Src: it.s.Src,
-				Tr: strings.TrimSpace(raw.Text)})
+			in := repairInput{ID: strconv.Itoa(i + 1), Src: it.s.Src, Tr: strings.TrimSpace(raw.Text)}
+			if p.prevOf != nil {
+				in.Prev = p.prevOf(it.s)
+			}
+			inputs = append(inputs, in)
 		}
 		if len(inputs) == 0 {
 			return nil
@@ -822,7 +914,7 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 			if text = strings.TrimSpace(text); text == "" || suspiciousTranslation(text) {
 				continue // dropped/artifact output — retried next round
 			}
-			_ = cache.Write(p.CacheDir, cache.RepairKey(it.s.Src, p.Source, target, p.rawModel()),
+			_ = cache.Write(p.CacheDir, cache.RepairKey(it.s.Src, p.Source, target, p.repairModel()),
 				tbook.Translation{Text: text})
 			cache.Remove(p.CacheDir, it.key) // stale alignment of the pre-proofread text
 		}
@@ -956,13 +1048,14 @@ func CountPendingTranslate(sentences []*tbook.Sentence, targets []string, cacheD
 // untranslated; sentences with neither get an empty translation. Returns the
 // count of (sentence,target) pairs found and missing.
 // The final entry lives under finalModel (which carries the repair marker when
-// the run proofreads); the raw and proofread texts live under rawModel, so the
-// fallback finds them whether or not repair is on.
+// the run proofreads); the raw translation lives under rawModel and the
+// proofread text under repairModel (empty when the run does not proofread), so
+// the fallback finds the text the book would have shipped either way.
 func FillFromCache(sentences []*tbook.Sentence, targets []string, cacheDir, source, finalModel,
-	rawModel string, repaired bool) (found, missing int) {
+	rawModel, repairModel string) (found, missing int) {
 	textKey := func(src, target string) string {
-		if repaired {
-			return cache.RepairKey(src, source, target, rawModel)
+		if repairModel != "" {
+			return cache.RepairKey(src, source, target, repairModel)
 		}
 		return cache.TrKey(src, source, target, rawModel)
 	}

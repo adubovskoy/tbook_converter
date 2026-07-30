@@ -49,7 +49,7 @@ func TestEndToEndOffline(t *testing.T) {
 	if pending := translate.CountPending(sentences, []string{"ru"}, cacheDir, "en", model, false); pending != 0 {
 		t.Fatalf("expected 0 pending after seeding, got %d", pending)
 	}
-	_, missing := translate.FillFromCache(sentences, []string{"ru"}, cacheDir, "en", model, model, false)
+	_, missing := translate.FillFromCache(sentences, []string{"ru"}, cacheDir, "en", model, model, "")
 	if missing != 0 {
 		t.Fatalf("expected 0 missing, got %d", missing)
 	}
