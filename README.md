@@ -99,6 +99,12 @@ Core: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
 `--provider gonka`, off everywhere else**; either flag (or `REPAIR` / `NO_REPAIR`)
 overrides that.
 
+`--context N` (env `REPAIR_CONTEXT`) — give that proofread pass the `N` preceding
+sentences with their translations, so it can *fix* a wrong gender or pronoun
+referent instead of being forbidden to touch it. **Use `0` (default) or `2`** —
+`1` is rejected, it measures worse than no context at all. See
+[Getting the best quality](#getting-the-best-quality).
+
 Machine integration (for scripts and services driving the converter):
 
 - `--estimate` — parse + segment only (no API calls, no key, no python) and
@@ -147,12 +153,102 @@ Content: `--keep-matter`, `--skip-files pat1,pat2`, `--no-images`, `--no-notes`,
 `--skip-citations` (leave bibliographic footnotes untranslated).
 
 Quality: `--no-glossary`, `--only-glossary` (build/edit the glossary, see
-above, then exit; `--force` rebuilds it), `--no-lexcheck`, `--judge` (semantic verification
+above, then exit; `--force` rebuilds it), `--repair`/`--context N` (proofread
+pass, above), `--no-lexcheck`, `--judge` (semantic verification
 report, see below), `--judge-scope` (`flagged` default: suspects + a 5%
 calibration sample — seconds per book | `all`), `--judge-model`,
 `--judge-invalidate`, `--escalate-model` (redo flagged sentences with a
 stronger model — see the warning below), `--invalidate file.json` (clear cached
 translations for listed sentences, then exit).
+
+## Getting the best quality
+
+Every recommendation below is a measured result, not a preference: arms were
+compared on the same book with blind pairwise judging of only the sentences that
+actually differ (research log: `bench-quality/LOG.md`, and the
+[speed report](https://github.com/adubovskoy/tbook_converter/issues/2)).
+
+### The best-quality recipe
+
+```bash
+./convert book.epub -o book.tbook -s en -t ru \
+    --provider gonka \        # near-free tokens — they pay for the extra pass
+    --context 2               # proofread with the 2 preceding sentences visible
+```
+
+That is it. Glossary, lexcheck and hybrid alignment are already on by default,
+and `--provider gonka` turns the proofread pass on by itself. On a 14.7k-sentence
+novel this runs ~32 min (translate 5m + proofread 15m + align 11m) and costs a
+fraction of a cent, against ~15 min on the metered default.
+
+What each part buys, measured on the same book:
+
+| Lever | Effect | Cost |
+|---|---|---|
+| Glossary (default) | recurring terms and names stay consistent book-wide | 1 call |
+| Hybrid alignment (default) | 99%/97% word coverage — **better** than the LLM align pass (94%/89%) | free, local |
+| Proofread pass (auto on gonka) | fixes ~4% of sentences, 87% of decisive blind judgements | 1 extra pass |
+| `--context 2` on top | 4.8% of sentences instead of 3.9%, 84% precision; best alignment coverage of any arm (94.0%) | ~3x the proofread phase |
+| Lexcheck (default) | offline drift report, ~87% recall at ~97% precision | free |
+
+The proofread pass is the single biggest quality lever, and the reason to
+convert on gonka at all: the defects a cheap model leaves are mostly
+**grammatical** (agreement — «мы вошёл», «была высокомерие»; case government;
+non-existent words like «задранила»), plus calqued idioms («Fire in the hole» →
+«Огненный взрыв»). A second pass over its own output catches those; a better
+translate prompt did not (see "what does not work" below).
+
+`--context 2` targets exactly what the blind pass is forbidden to do — settle a
+character's gender or a pronoun's referent. It is off by default because it
+triples the proofread phase for a net +0.4% of the book; turn it on when wall
+time is not the binding constraint. Two dials, not one: `--context 0` still gets
+you the proofread pass.
+
+### Free levers, whatever the provider
+
+1. **Edit the glossary before translating.** `./convert book.epub
+   --only-glossary` writes and opens `<out>.glossary.<src>-<tgt>.json`; fix how
+   names, invented terms and recurring words are rendered, then run normally.
+   Nothing else fixes a wrong term in every one of its 300 occurrences at once.
+2. **Set the source language explicitly** (`-s`) — a wrong pivot silently
+   degrades every pass.
+3. **Keep the cache.** Runs resume, and a re-run with a bumped prompt contract
+   re-aligns without re-translating. Never delete a cache dir to "start clean";
+   use `--invalidate` for the sentences you actually distrust.
+4. **Read the reports.** `<out>.lexflagged.json` costs nothing and points at
+   real drift.
+
+### On a metered provider (OpenRouter)
+
+The defaults are the measured optimum for cost/speed and need no tuning. If you
+want the quality recipe there anyway, add `--repair --context 2`: it roughly
+doubles token cost (the context adds ~50% input tokens on top of a whole extra
+pass) and buys less than on gonka, because gemini-class models make far fewer of
+the agreement and non-word errors the pass exists to fix. Measure before paying
+for it on a long book.
+
+### What does not work (don't spend time re-discovering)
+
+- **`--context 1`** — rejected by the tool. One sentence back gives the model
+  enough confidence to "correct" a character's gender and not enough evidence to
+  get it right: 80.0% precision against 87.1% with no context at all.
+- **`--align-mode llm` for a whole book** — worse coverage (94%/89% vs 99%/97%)
+  and 5–8x slower than the local aligner. The hybrid gate already sends the ~4%
+  of sentences that need it to the LLM.
+- **A stronger `--judge-model`** — it keeps full drift recall but flags 50–70% of
+  sentences on style pedantry, and rejects two thirds of its *own* escalated
+  output. The same-model judge plus lexcheck is the calibrated gate.
+- **`--escalate-model` with hybrid alignment** — see the escalation warning below.
+- **Idiom-focused translate prompting** — an arm that added an idiom block and
+  changed 49% of the book's sentences scored a statistical dead heat (50.7% vs
+  49.3%, p=0.93) and aligned slightly worse.
+- **`MiniMaxAI/MiniMax-M2.7` on gonka** — always reasons; ~2.4 h/book projected,
+  truncated batches, sentences lost. Stay on `moonshotai/Kimi-K2.6`.
+- **Bigger `--batch-size`** — generation is output-bound, so bigger is *slower*,
+  and on gonka a batch over 8 overflows the 16k-token output cap on verbose
+  targets.
+- **A second proofread pass** over the first — it changes another 1.1% of
+  sentences and then dies out.
 
 ## Quality & verification
 
@@ -206,9 +302,13 @@ glossary. Measured on gonka/Kimi-K2.6: it rewrites ~4% of a book's sentences and
 wins 87% of the decisive blind pairwise judgements on exactly those sentences
 (p=3.4e-05), for ~5 extra minutes and no change in alignment coverage. That is
 why it is default-on where tokens are free and off where they are metered.
+With `--context N` each item also carries the `N` preceding sentences and their
+translations (`prev`), which flips the "never guess a gender or referent" rule
+into "settle it from `prev` where `prev` settles it".
 Proofread text lives in its own cache namespace and the final aligned entry
-carries a `+rp` marker, so toggling the pass never re-translates a book and never
-serves an alignment built from the other variant.
+carries a `+rp` marker (`+rp:c2` with context), so toggling the pass — or the
+context — never re-translates a book and never serves an alignment built from
+another variant.
 
 Idioms and phrasal verbs map as units: "piss off" → "отвали" claims both
 source words (tapping either highlights the pair). The LLM align prompt has an
