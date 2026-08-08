@@ -2,8 +2,10 @@
 
 Date: 2026-08-08. HEAD `b267352`. Dev set: **Alastair Reynolds, "Revelation Space", chapters ONE+TWO**
 (`--limit-chapters 2`) = 1575 sentences / ~21,245 words, en→ru.
-Run artifacts: scratchpad `run/` (`rs-kimi.tbook`, `rs-gemma.tbook`, `rs-gemini.tbook`,
-`rs-kimi-repair.tbook`), pairs and verdicts — `run/pairs-*`.
+Run artifacts (gitignored — verbatim book text): `bench-quality/.artifacts/kimi-vs-gemma4/`
+— the four produced books (`rs-kimi.tbook`, `rs-gemma.tbook`, `rs-gemini.tbook`,
+`rs-kimi-repair.tbook`), per-request `*-stats.jsonl`, and `pairs-*/` with every judge batch,
+key and verdict, so `analyze_pairs.py` reproduces section 3 exactly.
 
 ## Verdict
 

@@ -27,3 +27,8 @@ __pycache__/
 
 # Research arms: throwaway convert binaries and produced books (see issue #8)
 /bench-quality/convert-*
+
+# Research evidence: judge batches/keys/verdicts, probe sets, diffs, mined
+# sentence dumps. Kept on disk (the reports cite it and /tmp is wiped between
+# sessions) but never published: it is verbatim copyrighted book text.
+/bench-quality/.artifacts/

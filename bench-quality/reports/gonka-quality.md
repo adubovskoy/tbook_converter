@@ -30,7 +30,7 @@ Hard constraint: **≤30 min per book**. All production arms were run on gonka.
 - **New tools** (in the repo, offline): `cmd/tbookdiff` (word-level diff of two `.tbook`s),
   `cmd/score` (tap coverage on both sides + alignment of expressions as units),
   `bench-quality/probe_align.py` (word coverage inside expressions),
-  `bench-quality/probe-dev.json` (194 manually checkable probes for idioms, phrasal verbs,
+  `bench-quality/.artifacts/probe-dev.json` (194 manually checkable probes for idioms, phrasal verbs,
   slang and set expressions, mined from the book).
 - Converter revision: 11f2f5b.
 
@@ -298,7 +298,11 @@ book; the gemini reference arm cost $0.086 for 5 chapters alone.
 
 ## Reproduction
 
-The tools and per-arm artifacts live in `converter/bench-quality/`: `LOG.md` (raw run
-log), `prepare_pairs.py` / `analyze_pairs.py` (the blind pairwise judging harness),
-`probe_align.py`, `probe-dev.json` (the probe set), `ac-sentences.json`, `*-diff.json` (repair
-diffs), `pairs-*/` (judge batches, keys and verdicts), `translate-v6.patch` (the rejected prompt).
+The tools live in `converter/bench-quality/` and are versioned: `reports/LOG.md` (raw run log),
+`prepare_pairs.py` / `analyze_pairs.py` (the blind pairwise judging harness), `probe_align.py`,
+`translate-v6.patch` (the rejected prompt).
+
+The evidence they consume sits in `converter/bench-quality/.artifacts/`, which is **gitignored**
+because it is verbatim copyrighted book text: `probe-dev.json` (the probe set),
+`ac-sentences.json`, `*-diff.json` (repair diffs), `pairs-*/` (judge batches, keys and verdicts).
+Reproducing the numbers needs that directory; it is kept on disk, not published.

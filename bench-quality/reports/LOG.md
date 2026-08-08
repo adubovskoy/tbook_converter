@@ -34,7 +34,7 @@ NB: gonka.md had 1279 sentences — segmentation has changed since then (chapter
 ## Stage 2 — re-baseline (in progress)
 - gemini-3.1-flash-lite arm: 1m10s, $0.086, coverage 98%/96%, lexcheck 33 (2.7%), gated 55 (vs Kimi 36) — gemini's freer translation aligns slightly worse.
 - tbookdiff kimi-a vs gemini-ref: text differs in 84.3% of sentences (194 identical!); coverage practically equal, Kimi slightly higher (content 0.993 vs 0.989; tap content 0.983 vs 0.981).
-- Blind pairwise: 300 pairs (seed 1, ≥6 words, both presentation orders), 10 judge agents (Sonnet), rubric fidelity > idioms/register > naturalness. Directory bench-quality/pairs-kimi-gemini/. Analysis: analyze_pairs.py (de-swap, decisive/tie, sign test).
+- Blind pairwise: 300 pairs (seed 1, ≥6 words, both presentation orders), 10 judge agents (Sonnet), rubric fidelity > idioms/register > naturalness. Directory bench-quality/.artifacts/pairs-kimi-gemini/. Analysis: analyze_pairs.py (de-swap, decisive/tie, sign test).
 - **RESULT: gemini 97 / kimi 47 out of 144 decisive (67.4% vs 32.6%), p=3.8e-05; 126 ties + 30 inconsistent.** Stage 3 target: raise Kimi to ≥45% of decisive pairs (parity gate). Judge notes: Kimi has idiom calques («дерьмо ударило в вентилятор» ← shit hit the fan; «он терял меня» ← he was losing me; «сорвать крышку с усталости» ← uncap my weariness) and agreement errors («мы вошёл», «была высокомерие»); gemini has lexical misses (lift→«лифт», mohican→«могиканин», particle→«частичный»), direction errors/tautologies.
 
 ## Stage 3 — translation quality levers
@@ -147,7 +147,7 @@ Recipe quality: validation 0/0/0, coverage 99%/97% (same as base), lexcheck 323�
 Artifacts: bench-quality/full-kimi.tbook, full-repair.tbook, full-repair-diff.json (544 edits), full-*-stats.jsonl.
 
 ## Hygiene notes
-- **The scratchpad in /tmp is wiped between sessions** — probe-chunk/probe-raw/probe-all and the mined chunks were lost (except bench-quality/probe-dev.json saved in the repo, 194 probes). Keep all research assets in bench-quality/. Restored: bench-quality/ac-sentences.json (9599 sentences with chapter numbers).
+- **The scratchpad in /tmp is wiped between sessions** — probe-chunk/probe-raw/probe-all and the mined chunks were lost (except bench-quality/.artifacts/probe-dev.json kept on disk, 194 probes). Keep all research assets in bench-quality/.artifacts/ (gitignored — verbatim book text). Restored: bench-quality/.artifacts/ac-sentences.json (9599 sentences with chapter numbers).
 - Claude session limits hit judge batches hard: 10 agents × 60 items ≈ 800k tokens. For the next comparisons — fewer pairs/agents, or one combo arm against two reference arms.
 - One cache dir per arm: .cache-exp-*. Delete the judge caches judge-*.json when the judge prompt changes, or use a fresh dir.
 - gonka stats have no cost field; price ~$0.000117/1M — not counting it.
