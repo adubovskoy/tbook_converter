@@ -37,6 +37,9 @@ def main():
     ap.add_argument('b'); ap.add_argument('lb')
     ap.add_argument('--n', type=int, default=300)
     ap.add_argument('--seed', type=int, default=1)
+    ap.add_argument('--skip', type=int, default=0,
+                    help='drop the first N sampled pairs — a second round with '
+                         'the same seed and --skip N is disjoint from the first')
     ap.add_argument('--min-words', type=int, default=6)
     ap.add_argument('--batch', type=int, default=10)
     ap.add_argument('--out', required=True)
@@ -48,8 +51,8 @@ def main():
     same = sum(1 for s in ta if s in tb and ta[s] == tb[s])
     rng = random.Random(args.seed)
     rng.shuffle(common)
-    sample = sorted(common[:args.n])  # deterministic id order
-    rng2 = random.Random(args.seed + 1)
+    sample = sorted(common[args.skip:args.skip + args.n])  # deterministic id order
+    rng2 = random.Random(args.seed + 1 + args.skip)
 
     import os
     os.makedirs(args.out, exist_ok=True)
