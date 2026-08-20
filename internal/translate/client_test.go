@@ -235,3 +235,56 @@ func TestCheckOllama(t *testing.T) {
 		t.Errorf("dead server should point at ollama serve, got: %v", err)
 	}
 }
+
+// An endpoint that mandates reasoning (every Gemini 3.x but 3.1 Flash Lite)
+// rejects the reasoning-off switch with a 400 — a permanent status, so without
+// this fallback the first batch of a paid conversion kills the whole run. The
+// fallback must ask for the cheapest effort tier, not merely hide the
+// reasoning: hiding it still pays for 2.4× the tokens (§5.1 of the four-model
+// bench report).
+func TestOpenRouterReasoningMandatoryFallback(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var got map[string]any
+		_ = json.Unmarshal(b, &got)
+		bodies = append(bodies, got)
+
+		w.Header().Set("Content-Type", "application/json")
+		if rs, _ := got["reasoning"].(map[string]any); rs["enabled"] != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","code":400}}`)
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"1\":\"Привет\"}"},"finish_reason":"stop"}]}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(Options{Provider: ProviderOpenRouter, BaseURL: srv.URL, APIKey: "k",
+		Model: "google/gemini-3.7-flash", MaxRetries: 2})
+	if _, err := c.TranslateText(context.Background(), "sys", `[{"id":"1","src":"Hi"}]`); err != nil {
+		t.Fatalf("TranslateText: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("%d requests sent, want 2 (the rejected one and the fallback)", len(bodies))
+	}
+	rs, ok := bodies[1]["reasoning"].(map[string]any)
+	if !ok || rs["effort"] != minimalEffort {
+		t.Errorf("fallback reasoning = %v, want effort %q", bodies[1]["reasoning"], minimalEffort)
+	}
+	if rs["enabled"] != nil {
+		t.Errorf("fallback still asks to disable reasoning: %v", rs)
+	}
+
+	// The rest of the run must not repeat the rejected request: hundreds of
+	// batches each paying their own 400 is a slow, noisy way to learn this.
+	if _, err := c.TranslateText(context.Background(), "sys", `[{"id":"1","src":"Hi"}]`); err != nil {
+		t.Fatalf("second batch: %v", err)
+	}
+	if len(bodies) != 3 {
+		t.Fatalf("%d requests after the second batch, want 3 — the model choice must stick", len(bodies))
+	}
+	if rs, _ := bodies[2]["reasoning"].(map[string]any); rs["effort"] != minimalEffort {
+		t.Errorf("second batch reasoning = %v, want effort %q", bodies[2]["reasoning"], minimalEffort)
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dimando/reader/converter/internal/align"
@@ -67,6 +68,11 @@ type Options struct {
 type Client struct {
 	opts Options
 	http *http.Client
+	// mandatesReasoning latches once the endpoint has rejected the
+	// reasoning-off switch, so the remaining batches of a run (hundreds, all
+	// concurrent) start with the effort tier instead of each paying its own
+	// rejected request first.
+	mandatesReasoning atomic.Bool
 }
 
 // NewClient builds a client. Timeout applies per HTTP request. The transport
@@ -95,10 +101,39 @@ type chatRequest struct {
 	Reasoning      *reasoningOpt   `json:"reasoning,omitempty"` // OpenRouter: unified reasoning switch
 }
 
-// reasoningOpt is OpenRouter's unified reasoning control; {"enabled":false}
-// turns reasoning off on hybrid models and is a no-op on the rest.
+// reasoningOpt is OpenRouter's unified reasoning control. {"enabled":false}
+// turns reasoning off on hybrid models and is a no-op on the rest; endpoints
+// that mandate reasoning reject it (see reasoningMandatory) and take an effort
+// tier instead.
 type reasoningOpt struct {
-	Enabled bool `json:"enabled"`
+	Enabled *bool  `json:"enabled,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+}
+
+// minimalEffort is the cheapest reasoning tier, for endpoints that refuse to
+// turn reasoning off. Measured on a 16-sentence en→ru batch against
+// google/gemini-3.7-flash: 0 reasoning tokens and 259 completion tokens, where
+// omitting the field (or asking only to hide the reasoning with
+// {"exclude":true}) reasons anyway — 441 reasoning tokens, 2.4× the cost, none
+// of which the pipeline reads. See converter/bench-quality/reports/
+// four-model-bench-2026-08.md §5.1.
+const minimalEffort = "minimal"
+
+// reasoningOff and reasoningMinimal are the two shapes above.
+func reasoningOff() *reasoningOpt {
+	off := false
+	return &reasoningOpt{Enabled: &off}
+}
+
+func reasoningMinimal() *reasoningOpt { return &reasoningOpt{Effort: minimalEffort} }
+
+// reasoningMandatory reports whether a 400 rejected the reasoning-off switch.
+// OpenRouter's wording: "Reasoning is mandatory for this endpoint and cannot
+// be disabled." — every Gemini 3.x but 3.1 Flash Lite answers this.
+func reasoningMandatory(err error) bool {
+	ae, ok := err.(*apiError)
+	return ok && ae.status == http.StatusBadRequest &&
+		strings.Contains(strings.ToLower(ae.msg), "reasoning is mandatory")
 }
 
 // thinkingOpt is the Anthropic-style reasoning switch the Gonka gateway
@@ -176,6 +211,9 @@ func (c *Client) providerLabel() string {
 // (*UsageLimitError) are not retried.
 func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(content string) error) error {
 	var send func(ctx context.Context, rec *statRec) (string, time.Duration, error)
+	// adapt gets one chance to rewrite the request after an otherwise
+	// permanent failure, and reports whether it did. nil = nothing to adapt.
+	var adapt func(error) bool
 	if c.opts.Provider == ProviderClaude {
 		send = func(ctx context.Context, rec *statRec) (string, time.Duration, error) {
 			rec.Provider = "claude-cli"
@@ -203,7 +241,10 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 			// the cost on a one-sentence probe) reason by default; the
 			// pipeline never reads reasoning, so switch it off. No-op for
 			// non-reasoning models like the gemini default.
-			req.Reasoning = &reasoningOpt{Enabled: false}
+			req.Reasoning = reasoningOff()
+			if c.mandatesReasoning.Load() {
+				req.Reasoning = reasoningMinimal()
+			}
 		}
 		// Gonka serves reasoning models; a translation batch never wants the
 		// reasoning (it inflates output tokens and latency, not quality).
@@ -217,6 +258,24 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 		send = func(ctx context.Context, rec *statRec) (string, time.Duration, error) {
 			rec.ReqBytes = len(payload)
 			return c.once(ctx, payload, rec)
+		}
+		// An endpoint that mandates reasoning 400s on the switch above, which
+		// would fail the whole run on its first batch (the glossary call).
+		// Fall back to the cheapest reasoning tier, once, then carry on.
+		adapt = func(err error) bool {
+			if !reasoningMandatory(err) || req.Reasoning == nil || req.Reasoning.Effort != "" {
+				return false
+			}
+			c.mandatesReasoning.Store(true)
+			req.Reasoning = reasoningMinimal()
+			next, mErr := json.Marshal(req)
+			if mErr != nil {
+				return false
+			}
+			payload = next
+			// No log line: this package prints nothing. The rejected attempt
+			// is already in the stats JSONL with its 400.
+			return true
 		}
 	}
 
@@ -240,6 +299,10 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 			c.opts.Stats.log(rec)
 			lastErr = err
 			if ae, ok := err.(*apiError); ok && ae.permanent() {
+				if adapt != nil && adapt(err) {
+					wait = 0
+					continue
+				}
 				return err
 			}
 			if _, ok := errors.AsType[*UsageLimitError](err); ok {
