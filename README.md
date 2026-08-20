@@ -128,9 +128,17 @@ Machine integration (for scripts and services driving the converter):
 
   The `source`/`target`/`title`/`author`/`sentences` fields at the top of the
   file scope it to one book and one language pair — a file that doesn't match
-  the current run (a second target language, or a glossary built under
-  `--limit-chapters`) is reported and rebuilt rather than enforced on a book
-  it was never built for. Don't hand-edit them.
+  the current run (a glossary built under `--limit-chapters`, say) is reported
+  and rebuilt rather than enforced on a book it was never built for. Don't
+  hand-edit them.
+
+  **One glossary per target language**: `-t de,fr` writes
+  `<out>.glossary.en-de.json` and `<out>.glossary.en-fr.json`, each with its own
+  cache namespace, so editing one never re-translates the other. The list is
+  source→target terms, so a shared one would order the model to write in the
+  wrong language — measured: an en→ru glossary enforced on six Latin targets put
+  Russian into 50–73% of their sentences
+  ([report](bench-quality/reports/four-model-bench-2026-08.md) §8).
 - `--progress-file file.ndjson` (env `PROGRESS_FILE`) — during a real
   conversion, append NDJSON progress events (one JSON per line, flushed per
   write, throttled to ≤ ~2 lines/sec per phase, final line of a phase always
@@ -273,12 +281,30 @@ Validation proves the file is *well-formed*; two gates check it is *correct*:
   judge over-flags the embedding aligner's per-word style (measured 53–57%
   false flags on correct de→ru alignments — see the speed report, issue #2).
 
+- **Language check** (free, offline, always on): flags translations that are not
+  in the target language at all — words in a script neither language uses (a
+  batch answered in Chinese; a Russian glossary enforced on a German target),
+  the source copied through untranslated, and one answer served for two targets
+  (`ru`/`uk`, `es`/`pt` — same script, so nothing else sees it). Flags go to
+  `<out>.langflagged.json` (per language, ready for `--invalidate`) with the
+  per-sentence evidence beside it in `<out>.langflagged.detail.json`. This is
+  the only gate that sees a wrong-language answer: validation checks structure,
+  the alignment `q` scores how well the words line up with whatever text
+  arrived, and lexcheck needs dictionary lookups, so text it cannot look up
+  produces no evidence at all.
+
 To redo sentences a report (or your own reading) flagged:
 
 ```bash
-./convert book.epub --invalidate book.tbook.lexflagged.json
+./convert book.epub --invalidate book.tbook.langflagged.json   # or .lexflagged.json
 ./convert book.epub -o book.tbook        # re-translates only those
 ```
+
+`--invalidate` clears the cached translation, the proofread text and the
+alignment in the namespaces **this** command reads, so pass it the same
+`--model`, glossary and `--repair`/`--context` settings the book was made with
+(a `{language: [sentences]}` file, which the language check writes, clears only
+the languages it names).
 
 **Escalation warning** (measured — speed report, issue #2): with the default
 `hybrid` alignment, leave `--escalate-model` off. The hybrid gate already

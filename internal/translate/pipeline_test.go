@@ -99,7 +99,7 @@ func TestTwoPassPipeline(t *testing.T) {
 	}
 
 	// Invalidate one sentence → it becomes pending again (translation+alignment cleared).
-	removed := cache.Invalidate(cacheDir, []string{"Hello world."}, []string{"ru"}, "en", model)
+	removed := cache.Invalidate(cacheDir, []string{"Hello world."}, []string{"ru"}, "en", model, model, "")
 	if removed != 2 {
 		t.Fatalf("expected 2 cache files removed, got %d", removed)
 	}

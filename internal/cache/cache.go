@@ -72,11 +72,23 @@ func RepairKey(src, source, target, model string) string {
 // sentence (across all targets) — used by the verify/QA loop: a semantic check
 // flags bad sentences, this clears them, and the next run redoes exactly those
 // (e.g. with a stronger model). Returns the number of cache files removed.
-func Invalidate(dir string, srcs, targets []string, source, model string) int {
+// The namespaces are the run's own: raw is where pass-1 text lives, final where
+// the aligned entry lives (they differ when the run proofreads), and repair
+// where the proofread text lives ("" when the run does not proofread). Passing
+// the plain model id where the run used a glossary-scoped namespace deletes
+// nothing — the keys simply do not exist.
+func Invalidate(dir string, srcs, targets []string, source, raw, final, repair string) int {
 	removed := 0
 	for _, src := range srcs {
 		for _, target := range targets {
-			for _, key := range []string{Key(src, source, target, model), TrKey(src, source, target, model)} {
+			keys := []string{Key(src, source, target, final), TrKey(src, source, target, raw)}
+			if final != raw {
+				keys = append(keys, Key(src, source, target, raw))
+			}
+			if repair != "" {
+				keys = append(keys, RepairKey(src, source, target, repair))
+			}
+			for _, key := range keys {
 				if os.Remove(filepath.Join(dir, key+".json")) == nil {
 					removed++
 				}

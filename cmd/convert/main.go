@@ -33,6 +33,7 @@ import (
 	"github.com/dimando/reader/converter/internal/embalign"
 	"github.com/dimando/reader/converter/internal/epub"
 	"github.com/dimando/reader/converter/internal/fb2"
+	"github.com/dimando/reader/converter/internal/langcheck"
 	"github.com/dimando/reader/converter/internal/lexcheck"
 	"github.com/dimando/reader/converter/internal/progress"
 	"github.com/dimando/reader/converter/internal/segment"
@@ -77,22 +78,6 @@ func run() error {
 		}
 		defer statsLog.Close()
 		fmt.Printf("Per-request metrics → %s\n", cfg.StatsPath)
-	}
-
-	// Verify/QA loop: clear cached translation+alignment for flagged sentences,
-	// then exit. A following run redoes exactly those (e.g. with a stronger model).
-	if cfg.Invalidate != "" {
-		srcs, err := loadSrcList(cfg.Invalidate)
-		if err != nil {
-			return fmt.Errorf("read --invalidate file: %w", err)
-		}
-		if err := ensureLlamaCppModel(cfg); err != nil {
-			return err
-		}
-		n := cache.Invalidate(cfg.CacheDir, srcs, cfg.Targets, cfg.Source, cfg.Model)
-		fmt.Printf("Invalidated %d cache file(s) for %d source sentence(s) — re-run to redo them.\n",
-			n, len(srcs))
-		return nil
 	}
 
 	// Machine-readable NDJSON progress events for a supervising process
@@ -213,38 +198,39 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		return err
 	}
 
-	cacheModel := cfg.Model
-	var glossary []translate.GlossEntry
-
 	// The glossary is a user-editable JSON file alongside the output .tbook
 	// (--only-glossary writes and opens it for editing before any translation
 	// runs). Once it exists, every later run loads it verbatim — edits
 	// included — instead of rebuilding it from the model. The file is scoped
 	// to this book and language pair; one built for another is ignored.
+	//
+	// EVERY target gets its own: a glossary is a list of source→TARGET terms,
+	// so one target's list enforced on another asks the model to write in the
+	// wrong language (measured: an en→ru glossary enforced on six Latin targets
+	// put Russian into 50–73% of their sentences — bench-quality/reports/
+	// four-model-bench-2026-08.md §8).
 	wantGlossary := cfg.Glossary || cfg.OnlyGlossary
-	glossScope := translate.GlossaryScope{
-		Source: cfg.Source, Target: cfg.Targets[0],
-		Title: title, Author: author, Sentences: len(sentences),
+	glossaries := resolveGlossaries(cfg, title, author, len(sentences))
+	needsGlossaryBuild := false
+	for _, g := range glossaries {
+		needsGlossaryBuild = needsGlossaryBuild || g.needsBuild
 	}
-	glossPath := translate.GlossaryFilePath(cfg.Out, glossScope)
-	haveGlossFile := false
-	if wantGlossary && !(cfg.OnlyGlossary && cfg.Force) { // --only-glossary --force: discard and rebuild
-		if entries, lerr := translate.LoadGlossaryFile(glossPath, glossScope); lerr == nil {
-			glossary, haveGlossFile = entries, true
-			// The hash must be known before the pending count below: it
-			// namespaces the translation cache, and a file-supplied glossary
-			// needs no LLM to produce it.
-			cacheModel = translate.CacheKeyModel(cfg.Model, translate.GlossHash(glossary))
-		} else if !errors.Is(lerr, fs.ErrNotExist) {
-			fmt.Printf("Glossary: ignoring %s (%v) — rebuilding\n", glossPath, lerr)
-		}
+
+	// Verify/QA loop: clear the cached translation, proofread text and
+	// alignment of the flagged sentences, then exit — in the namespaces THIS
+	// configuration reads, per target, so a re-run redoes exactly them.
+	if cfg.Invalidate != "" {
+		return runInvalidate(cfg, glossaries, translatable)
 	}
-	needsGlossaryBuild := wantGlossary && !haveGlossFile
 
 	// Only the unfinished work needs the LLM; a fully-cached run assembles
 	// offline (resume / re-assemble) without a key or CLI.
 	countPending := func() int {
-		return pendingFinal(cfg, translatable, cacheModel)
+		n := 0
+		for _, g := range glossaries {
+			n += pendingFinal(cfg, translatable, []string{g.target}, g.cacheModel)
+		}
+		return n
 	}
 	needAPI := countPending() > 0 || needsGlossaryBuild || cfg.Judge
 	switch {
@@ -253,7 +239,10 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		needAPI = needsGlossaryBuild
 	case cfg.AlignMode == config.AlignEmb && !needsGlossaryBuild && !cfg.Judge:
 		// emb aligns locally: only the text passes need the LLM.
-		needAPI = pendingText(cfg, translatable, cacheModel) > 0
+		needAPI = false
+		for _, g := range glossaries {
+			needAPI = needAPI || pendingText(cfg, translatable, []string{g.target}, g.cacheModel) > 0
+		}
 	}
 	var client *translate.Client
 	if needAPI {
@@ -311,27 +300,37 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	// namespaces the cache so translations made under a different glossary
 	// never mix.
 	if wantGlossary {
-		if needsGlossaryBuild {
-			var ghash string
-			glossary, ghash, err = translate.BuildGlossary(ctx, client, cfg.CacheDir, sentences,
-				cfg.Source, cfg.Targets[0], title, author)
-			if err != nil {
-				return fmt.Errorf("glossary: %w", err)
+		for _, g := range glossaries {
+			if g.needsBuild {
+				entries, ghash, berr := translate.BuildGlossary(ctx, client, cfg.CacheDir, sentences,
+					cfg.Source, g.target, title, author)
+				if berr != nil {
+					return fmt.Errorf("glossary %s→%s: %w", cfg.Source, g.target, berr)
+				}
+				g.entries, g.cacheModel = entries, translate.CacheKeyModel(cfg.Model, ghash)
+				if werr := translate.WriteGlossaryFile(g.path, g.scope, g.entries); werr != nil {
+					fmt.Printf("Glossary: couldn't write %s (%v) — edits won't be picked up next run\n", g.path, werr)
+				}
+			} else {
+				fmt.Printf("Glossary [%s]: using %d term(s) from %s\n", g.target, len(g.entries), g.path)
 			}
-			cacheModel = translate.CacheKeyModel(cfg.Model, ghash)
-			if werr := translate.WriteGlossaryFile(glossPath, glossScope, glossary); werr != nil {
-				fmt.Printf("Glossary: couldn't write %s (%v) — edits won't be picked up next run\n", glossPath, werr)
-			}
-		} else {
-			fmt.Printf("Glossary: using %d term(s) from %s\n", len(glossary), glossPath)
+			fmt.Printf("Glossary [%s]: %d enforced terms (cache namespace %s)\n",
+				g.target, len(g.entries), g.cacheModel)
 		}
-		fmt.Printf("Glossary: %d enforced terms (cache namespace %s)\n", len(glossary), cacheModel)
 
 		if cfg.OnlyGlossary {
-			fmt.Printf("Edit %s to change how terms are translated, then re-run without --only-glossary to translate.\n", glossPath)
-			fmt.Println("(delete it, or re-run with --only-glossary --force, to rebuild it from the model)")
-			if oerr := openGlossary(glossPath); oerr != nil {
-				fmt.Printf("(couldn't open it automatically: %v — open it yourself)\n", oerr)
+			fmt.Println("Edit the file(s) below to change how terms are translated, then re-run " +
+				"without --only-glossary to translate.")
+			fmt.Println("(delete one, or re-run with --only-glossary --force, to rebuild it from the model)")
+			for _, g := range glossaries {
+				fmt.Printf("  %s\n", g.path)
+			}
+			// Opening one editor per language would bury the user under windows;
+			// a single target still opens, which is the common case.
+			if len(glossaries) == 1 {
+				if oerr := openGlossary(glossaries[0].path); oerr != nil {
+					fmt.Printf("(couldn't open it automatically: %v — open it yourself)\n", oerr)
+				}
 			}
 			return nil
 		}
@@ -349,7 +348,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		case config.ProviderLlamaCpp:
 			via = cfg.Model + " (llama.cpp at " + cfg.BaseURL + ")"
 		}
-		fmt.Printf("%s %s→%s via %s ...\n", pendingPhaseVerb(cfg, translatable, cacheModel),
+		fmt.Printf("%s %s→%s via %s ...\n", pendingPhaseVerb(cfg, translatable, glossaries),
 			cfg.Source, strings.Join(cfg.Targets, ","), via)
 		if cfg.Repair {
 			fmt.Println("Proofread pass ON (one extra LLM pass over every translation before aligning).")
@@ -363,8 +362,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 			BatchSize: cfg.BatchSize, AlignBatch: cfg.AlignBatch,
 			Concurrency: cfg.Concurrency,
 			Force:       cfg.Force,
-			Glossary:    glossary, CacheModel: cacheModel,
-			Repair: cfg.Repair, RepairContext: cfg.RepairContext,
+			Repair:      cfg.Repair, RepairContext: cfg.RepairContext,
 			AlignMode: cfg.AlignMode, EmbQMin: cfg.EmbQMin,
 			Progress: progressLog,
 		}
@@ -404,8 +402,13 @@ func convert(cfg *config.Config, runStart time.Time) error {
 			}
 		}
 		t0 := time.Now()
-		if err := pipe.Run(ctx, translatable, cfg.Targets); err != nil {
-			return err
+		// One run per target: the enforced glossary and the cache namespace it
+		// implies are per language, and the pipeline holds one of each.
+		for _, g := range glossaries {
+			pipe.Glossary, pipe.CacheModel = g.entries, g.cacheModel
+			if err := pipe.Run(ctx, translatable, []string{g.target}); err != nil {
+				return err
+			}
 		}
 		fmt.Printf("Pipeline (translate+align) wall time: %s\n", time.Since(t0).Round(time.Second))
 	} else {
@@ -414,8 +417,12 @@ func convert(cfg *config.Config, runStart time.Time) error {
 
 	// Fill from cache + assemble. Citation sentences are filled too (they may
 	// be cached from earlier runs); missing ones stay empty.
-	found, missing := translate.FillFromCache(allSents, cfg.Targets, cfg.CacheDir, cfg.Source,
-		finalModel(cfg, cacheModel), cacheModel, repairModel(cfg, cacheModel))
+	found, missing := 0, 0
+	for _, g := range glossaries {
+		f, m := translate.FillFromCache(allSents, []string{g.target}, cfg.CacheDir, cfg.Source,
+			finalModel(cfg, g.cacheModel), g.cacheModel, repairModel(cfg, g.cacheModel))
+		found, missing = found+f, missing+m
+	}
 	fmt.Printf("Filled %d translations from cache (%d missing).\n", found, missing)
 
 	// Verification passes. Lexcheck is the free, offline gate: a bilingual
@@ -431,6 +438,9 @@ func convert(cfg *config.Config, runStart time.Time) error {
 			flaggedSet[src] = true
 		}
 	}
+	// Wrong-language output is invisible to every other gate, so this one always
+	// runs: it is a pure string check over the text already in memory.
+	runLangcheck(cfg, translatable)
 	if cfg.Judge {
 		judgeInput := translatable
 		var sample []string
@@ -438,7 +448,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 			judgeInput, sample = judgeScopeFlagged(cfg, translatable, flaggedSet)
 		}
 		t0 := time.Now()
-		flagged, err := runJudge(ctx, cfg, judgeInput)
+		flagged, err := runJudge(ctx, cfg, glossaries, judgeInput)
 		if err != nil {
 			return err
 		}
@@ -455,13 +465,13 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		}
 		sort.Strings(flagged)
 		t0 := time.Now()
-		if err := escalate(ctx, cfg, glossary, cacheModel, translatable, flagged); err != nil {
+		if err := escalate(ctx, cfg, glossaries, translatable, flagged); err != nil {
 			return err
 		}
 		// A stronger model is not a verified model: re-run the same gates over
 		// the escalated output, give it one redo, and fall back for whatever
 		// still fails — never ship an unvetted rewrite.
-		if err := reverifyEscalated(ctx, cfg, glossary, cacheModel, translatable, flagged); err != nil {
+		if err := reverifyEscalated(ctx, cfg, glossaries, translatable, flagged); err != nil {
 			return err
 		}
 		fmt.Printf("Escalation wall time: %s\n", time.Since(t0).Round(time.Second))
@@ -476,7 +486,11 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	if meta == nil {
 		meta = &tbook.Meta{}
 	}
-	meta.AppendRun(metaRun(cfg, cfg.Targets, len(glossary), runStart))
+	glossTerms := 0
+	for _, g := range glossaries {
+		glossTerms += len(g.entries)
+	}
+	meta.AppendRun(metaRun(cfg, cfg.Targets, glossTerms, runStart))
 	out := &tbook.Book{
 		Title: title, Author: author,
 		Source: cfg.Source, Targets: writeTargets,
@@ -745,7 +759,31 @@ func mergeTargets(existing, requested []string) []string {
 // flagged sources. Skipped with a notice when no lexicon file exists for the
 // language pair.
 func runLexcheck(cfg *config.Config, sentences []*tbook.Sentence) []string {
-	target := cfg.Targets[0]
+	seen := map[string]bool{}
+	var flagged []string
+	for _, target := range cfg.Targets {
+		for _, src := range runLexcheckTarget(cfg, sentences, target) {
+			if !seen[src] {
+				seen[src] = true
+				flagged = append(flagged, src)
+			}
+		}
+	}
+	if len(flagged) > 0 {
+		sort.Strings(flagged)
+		path := cfg.Out + ".lexflagged.json"
+		if err := translate.WriteFlagged(path, flagged); err == nil {
+			fmt.Printf("Lexcheck flags written to %s (all targets)\n", path)
+		}
+	}
+	return flagged
+}
+
+// runLexcheckTarget checks one language pair. Every target is checked: a
+// multi-target run that stopped at the first one left the other languages
+// unexamined — that is how a book shipped with Russian in six Latin targets
+// (bench-quality/reports/four-model-bench-2026-08.md §8).
+func runLexcheckTarget(cfg *config.Config, sentences []*tbook.Sentence, target string) []string {
 	dict, err := lexcheck.Load(cfg.LexiconDir, cfg.Source, target)
 	if err != nil {
 		fmt.Printf("lexcheck: %v — skipped\n", err)
@@ -779,15 +817,9 @@ func runLexcheck(cfg *config.Config, sentences []*tbook.Sentence) []string {
 		}
 		flagged = append(flagged, s.Src)
 	}
-	fmt.Printf("Lexcheck (%d headwords): %d checked, %d flagged (%d low-support, %d shift-pattern)\n",
-		dict.Entries(), checked, len(flagged), lowSupport, shiftPattern)
-	if len(flagged) > 0 {
-		sort.Strings(flagged)
-		path := cfg.Out + ".lexflagged.json"
-		if err := translate.WriteFlagged(path, flagged); err == nil {
-			fmt.Printf("Lexcheck flags written to %s\n", path)
-		}
-	}
+	fmt.Printf("Lexcheck [%s] (%d headwords): %d checked, %d flagged (%d low-support, %d shift-pattern)\n",
+		target, dict.Entries(), checked, len(flagged), lowSupport, shiftPattern)
+	sort.Strings(flagged)
 	return flagged
 }
 
@@ -802,14 +834,135 @@ func finalModel(cfg *config.Config, cacheModel string) string {
 	return cacheModel
 }
 
+// glossaryNS is one target language's enforced glossary and the cache namespace
+// it implies. Every target needs its own: a glossary lists source→TARGET terms,
+// so enforcing one language's list while translating into another instructs the
+// model, term by term, to write in the wrong language.
+type glossaryNS struct {
+	target     string
+	path       string // user-editable sidecar
+	scope      translate.GlossaryScope
+	entries    []translate.GlossEntry
+	cacheModel string // model id + glossary hash: the cache namespace
+	needsBuild bool   // no usable sidecar yet, so the glossary pass must run
+}
+
+// resolveGlossaries prepares one namespace per target, loading each sidecar that
+// already exists (offline, no LLM). A target whose file is missing or belongs to
+// another book is marked for the glossary pass; with --no-glossary every target
+// keeps the plain model namespace.
+func resolveGlossaries(cfg *config.Config, title, author string, nSentences int) []*glossaryNS {
+	wantGlossary := cfg.Glossary || cfg.OnlyGlossary
+	out := make([]*glossaryNS, 0, len(cfg.Targets))
+	for _, target := range cfg.Targets {
+		g := &glossaryNS{target: target, cacheModel: cfg.Model}
+		g.scope = translate.GlossaryScope{
+			Source: cfg.Source, Target: target,
+			Title: title, Author: author, Sentences: nSentences,
+		}
+		g.path = translate.GlossaryFilePath(cfg.Out, g.scope)
+		if wantGlossary {
+			g.needsBuild = true
+			if !(cfg.OnlyGlossary && cfg.Force) { // --only-glossary --force: discard and rebuild
+				if entries, lerr := translate.LoadGlossaryFile(g.path, g.scope); lerr == nil {
+					// The hash must be known before the pending count: it
+					// namespaces the cache, and a file-supplied glossary needs
+					// no LLM to produce it.
+					g.entries, g.needsBuild = entries, false
+					g.cacheModel = translate.CacheKeyModel(cfg.Model, translate.GlossHash(entries))
+				} else if !errors.Is(lerr, fs.ErrNotExist) {
+					fmt.Printf("Glossary: ignoring %s (%v) — rebuilding\n", g.path, lerr)
+				}
+			}
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+// runInvalidate clears the cached artifacts of the listed sentences and exits,
+// so the next run redoes exactly them (with a stronger model, a fixed glossary,
+// whatever the report asked for). It deletes in the namespaces THIS
+// configuration reads — per target, glossary hash included — because a book
+// translated with the glossary on (the default) stores nothing under the plain
+// model id, and the proofread text and repair-marked alignment live in
+// namespaces of their own.
+//
+// The file may be a JSON array of source sentences (what the lexcheck and judge
+// reports write) or an object of {target: [sentences]} (what the language report
+// writes), in which case only the named targets are cleared.
+func runInvalidate(cfg *config.Config, glossaries []*glossaryNS, sentences []*tbook.Sentence) error {
+	byTarget, err := loadInvalidateList(cfg.Invalidate, cfg.Targets)
+	if err != nil {
+		return fmt.Errorf("read --invalidate file: %w", err)
+	}
+	total, listed := 0, 0
+	for _, g := range glossaries {
+		srcs := byTarget[g.target]
+		if len(srcs) == 0 {
+			continue
+		}
+		listed += len(srcs)
+		total += cache.Invalidate(cfg.CacheDir, srcs, []string{g.target}, cfg.Source,
+			g.cacheModel, finalModel(cfg, g.cacheModel), repairModel(cfg, g.cacheModel))
+	}
+	fmt.Printf("Invalidated %d cache file(s) for %d (sentence,language) pair(s) — re-run to redo them.\n",
+		total, listed)
+	if total == 0 && listed > 0 {
+		fmt.Println("Nothing matched: the flags must come from a run with the same model, " +
+			"glossary and --repair/--context settings as this command.")
+	}
+	return nil
+}
+
+// runLangcheck flags translations that are not in the target language at all
+// (see internal/langcheck) and writes the report next to the output. Free and
+// offline; it is the only gate that sees a wrong-language answer, which
+// validation, the alignment q-score and lexcheck all pass as fine.
+func runLangcheck(cfg *config.Config, sentences []*tbook.Sentence) {
+	flags := langcheck.Check(sentences, cfg.Source, cfg.Targets, langcheck.Options{})
+	if len(flags) == 0 {
+		fmt.Printf("Language check: clean (%s → %s)\n", cfg.Source, strings.Join(cfg.Targets, ","))
+		return
+	}
+	for _, sum := range langcheck.Summarize(flags, cfg.Targets) {
+		parts := make([]string, 0, len(sum.Kinds))
+		for _, kind := range []string{langcheck.KindForeignScript, langcheck.KindUntranslated,
+			langcheck.KindDuplicateTarget} {
+			if n := sum.Kinds[kind]; n > 0 {
+				parts = append(parts, fmt.Sprintf("%d %s", n, kind))
+			}
+		}
+		fmt.Printf("Language check [%s]: %d flagged (%s)\n", sum.Target, sum.Total,
+			strings.Join(parts, ", "))
+	}
+	path := cfg.Out + ".langflagged.json"
+	if err := writeJSONFile(path, langcheck.SrcsByTarget(flags)); err != nil {
+		fmt.Printf("Language check: couldn't write %s (%v)\n", path, err)
+		return
+	}
+	fmt.Printf("Language flags written to %s — repair with --invalidate %s, then re-run\n", path, path)
+	if detail := cfg.Out + ".langflagged.detail.json"; writeJSONFile(detail, flags) == nil {
+		fmt.Printf("  (per-sentence evidence: %s)\n", detail)
+	}
+}
+
+func writeJSONFile(path string, v any) error {
+	b, err := json.MarshalIndent(v, "", " ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(b, '\n'), 0o644)
+}
+
 // pendingFinal counts the (sentence,target) pairs with no cached FINAL entry
 // for THIS run's settings — the work that stands between the cache and an
 // assembled book. It must count in the namespace assembly later READS from:
 // with --repair that is the proofread-marked one, so adding the pass to an
 // already-translated book sees the pass as work instead of reporting the book
 // as fully cached and assembling it empty.
-func pendingFinal(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) int {
-	return translate.CountPending(sentences, cfg.Targets, cfg.CacheDir, cfg.Source,
+func pendingFinal(cfg *config.Config, sentences []*tbook.Sentence, targets []string, cacheModel string) int {
+	return translate.CountPending(sentences, targets, cfg.CacheDir, cfg.Source,
 		finalModel(cfg, cacheModel), cfg.Force)
 }
 
@@ -818,31 +971,35 @@ func pendingFinal(cfg *config.Config, sentences []*tbook.Sentence, cacheModel st
 // proofread). pendingText is the larger of the two: the sentences that still
 // need an LLM TEXT pass, which with --align-mode emb (local aligner) is the
 // whole API bill.
-func pendingRaw(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) int {
-	return translate.CountPendingTranslate(sentences, cfg.Targets, cfg.CacheDir, cfg.Source,
+func pendingRaw(cfg *config.Config, sentences []*tbook.Sentence, targets []string, cacheModel string) int {
+	return translate.CountPendingTranslate(sentences, targets, cfg.CacheDir, cfg.Source,
 		cacheModel, cfg.Force)
 }
 
-func pendingRepair(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) int {
-	return translate.CountPendingRepair(sentences, cfg.Targets, cfg.CacheDir, cfg.Source,
+func pendingRepair(cfg *config.Config, sentences []*tbook.Sentence, targets []string, cacheModel string) int {
+	return translate.CountPendingRepair(sentences, targets, cfg.CacheDir, cfg.Source,
 		repairModel(cfg, cacheModel), cfg.Force)
 }
 
-func pendingText(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) int {
-	return max(pendingRaw(cfg, sentences, cacheModel), pendingRepair(cfg, sentences, cacheModel))
+func pendingText(cfg *config.Config, sentences []*tbook.Sentence, targets []string, cacheModel string) int {
+	return max(pendingRaw(cfg, sentences, targets, cacheModel),
+		pendingRepair(cfg, sentences, targets, cacheModel))
 }
 
 // pendingPhaseVerb names the first phase that actually needs the LLM, so a
 // re-run over a filled cache does not announce "Translating" when every raw
 // translation is already there and only the proofread or align pass is left.
-func pendingPhaseVerb(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) string {
-	switch {
-	case pendingRaw(cfg, sentences, cacheModel) > 0:
-		return "Translating"
-	case pendingRepair(cfg, sentences, cacheModel) > 0:
-		return "Proofreading"
+func pendingPhaseVerb(cfg *config.Config, sentences []*tbook.Sentence, glossaries []*glossaryNS) string {
+	verb := "Aligning"
+	for _, g := range glossaries {
+		if pendingRaw(cfg, sentences, []string{g.target}, g.cacheModel) > 0 {
+			return "Translating"
+		}
+		if pendingRepair(cfg, sentences, []string{g.target}, g.cacheModel) > 0 {
+			verb = "Proofreading"
+		}
 	}
-	return "Aligning"
+	return verb
 }
 
 // repairModel is the cache namespace of the PROOFREAD text — empty when the run
@@ -873,8 +1030,8 @@ func subsetBySrc(sentences []*tbook.Sentence, srcs []string) []*tbook.Sentence {
 // escalateRun redoes a subset (translate + align) with the stronger
 // --escalate-model, overwriting their entries in the PRIMARY model's cache
 // namespace, then refreshes them from cache.
-func escalateRun(ctx context.Context, cfg *config.Config, glossary []translate.GlossEntry,
-	cacheModel string, subset []*tbook.Sentence) error {
+func escalateRun(ctx context.Context, cfg *config.Config, glossaries []*glossaryNS,
+	subset []*tbook.Sentence) error {
 
 	ec := translate.NewClient(clientOptions(cfg, cfg.EscalateModel, cfg.Temperature))
 	pipe := &translate.Pipeline{
@@ -882,26 +1039,30 @@ func escalateRun(ctx context.Context, cfg *config.Config, glossary []translate.G
 		BatchSize: cfg.BatchSize, AlignBatch: cfg.AlignBatch,
 		Concurrency: cfg.Concurrency,
 		Force:       true, // redo even though (bad) entries are cached
-		Glossary:    glossary, CacheModel: cacheModel,
 	}
-	if err := pipe.Run(ctx, subset, cfg.Targets); err != nil {
-		return err
+	found, missing := 0, 0
+	for _, g := range glossaries {
+		pipe.Glossary, pipe.CacheModel = g.entries, g.cacheModel
+		if err := pipe.Run(ctx, subset, []string{g.target}); err != nil {
+			return err
+		}
+		f, m := translate.FillFromCache(subset, []string{g.target}, cfg.CacheDir, cfg.Source,
+			finalModel(cfg, g.cacheModel), g.cacheModel, repairModel(cfg, g.cacheModel))
+		found, missing = found+f, missing+m
 	}
-	found, missing := translate.FillFromCache(subset, cfg.Targets, cfg.CacheDir, cfg.Source,
-		finalModel(cfg, cacheModel), cacheModel, repairModel(cfg, cacheModel))
 	fmt.Printf("Escalation done: %d refreshed (%d missing).\n", found, missing)
 	return nil
 }
 
-func escalate(ctx context.Context, cfg *config.Config, glossary []translate.GlossEntry,
-	cacheModel string, sentences []*tbook.Sentence, flagged []string) error {
+func escalate(ctx context.Context, cfg *config.Config, glossaries []*glossaryNS,
+	sentences []*tbook.Sentence, flagged []string) error {
 
 	subset := subsetBySrc(sentences, flagged)
 	if len(subset) == 0 {
 		return nil
 	}
 	fmt.Printf("Escalating %d flagged sentences to %s ...\n", len(subset), cfg.EscalateModel)
-	return escalateRun(ctx, cfg, glossary, cacheModel, subset)
+	return escalateRun(ctx, cfg, glossaries, subset)
 }
 
 // reverifyEscalated closes the loop escalation used to leave open: the same
@@ -910,8 +1071,8 @@ func escalate(ctx context.Context, cfg *config.Config, glossary []translate.Glos
 // — a judged mistranslation loses its translation entirely (re-translated on
 // the next run), an alignment failure keeps the raw translation with no
 // highlights. Nothing the gates rejected ships silently.
-func reverifyEscalated(ctx context.Context, cfg *config.Config, glossary []translate.GlossEntry,
-	cacheModel string, sentences []*tbook.Sentence, flagged []string) error {
+func reverifyEscalated(ctx context.Context, cfg *config.Config, glossaries []*glossaryNS,
+	sentences []*tbook.Sentence, flagged []string) error {
 
 	subset := subsetBySrc(sentences, flagged)
 	if len(subset) == 0 || (!cfg.Lexcheck && !cfg.Judge) {
@@ -956,7 +1117,7 @@ func reverifyEscalated(ctx context.Context, cfg *config.Config, glossary []trans
 	}
 	if len(still) > 0 { // one redo, then re-check
 		fmt.Printf("Re-escalating %d still-flagged sentences ...\n", len(still))
-		if err := escalateRun(ctx, cfg, glossary, cacheModel, subsetBySrc(subset, still)); err != nil {
+		if err := escalateRun(ctx, cfg, glossaries, subsetBySrc(subset, still)); err != nil {
 			return err
 		}
 		if still, err = verify(subsetBySrc(subset, still)); err != nil {
@@ -971,22 +1132,24 @@ func reverifyEscalated(ctx context.Context, cfg *config.Config, glossary []trans
 	// Persistent failures: strip what the gates rejected and refill from cache.
 	dropped, kept := 0, 0
 	for _, s := range subsetBySrc(subset, still) {
-		for _, target := range cfg.Targets {
+		for _, g := range glossaries {
 			mistranslated := false
-			if v, ok := translate.VerdictFor(cfg.CacheDir, cfg.JudgeModel, cfg.Source, target, s); ok {
+			if v, ok := translate.VerdictFor(cfg.CacheDir, cfg.JudgeModel, cfg.Source, g.target, s); ok {
 				mistranslated = strings.Contains(v.Why, "mistranslation")
 			}
-			cache.Remove(cfg.CacheDir, cache.Key(s.Src, cfg.Source, target, cacheModel))
+			cache.Remove(cfg.CacheDir, cache.Key(s.Src, cfg.Source, g.target, g.cacheModel))
 			if mistranslated {
-				cache.Remove(cfg.CacheDir, cache.TrKey(s.Src, cfg.Source, target, cacheModel))
+				cache.Remove(cfg.CacheDir, cache.TrKey(s.Src, cfg.Source, g.target, g.cacheModel))
 				dropped++
 			} else {
 				kept++
 			}
 		}
 	}
-	translate.FillFromCache(subsetBySrc(subset, still), cfg.Targets, cfg.CacheDir, cfg.Source,
-		finalModel(cfg, cacheModel), cacheModel, repairModel(cfg, cacheModel))
+	for _, g := range glossaries {
+		translate.FillFromCache(subsetBySrc(subset, still), []string{g.target}, cfg.CacheDir, cfg.Source,
+			finalModel(cfg, g.cacheModel), g.cacheModel, repairModel(cfg, g.cacheModel))
+	}
 	path := cfg.Out + ".unverified.json"
 	_ = translate.WriteFlagged(path, still)
 	fmt.Printf("Escalation left %d sentences unverified (%d ship raw with no highlights, "+
@@ -1000,7 +1163,8 @@ func reverifyEscalated(ctx context.Context, cfg *config.Config, glossary []trans
 // --judge-invalidate the flagged cache entries are cleared immediately, so the
 // very next run re-translates them (e.g. with a stronger --model). Returns the
 // flagged source sentences.
-func runJudge(ctx context.Context, cfg *config.Config, sentences []*tbook.Sentence) ([]string, error) {
+func runJudge(ctx context.Context, cfg *config.Config, glossaries []*glossaryNS,
+	sentences []*tbook.Sentence) ([]string, error) {
 	jc := translate.NewClient(clientOptions(cfg, cfg.JudgeModel, 0))
 	fmt.Printf("Judging translations via %s ...\n", cfg.JudgeModel)
 	// Judge batches are smaller than translate batches: each item carries the
@@ -1036,7 +1200,11 @@ func runJudge(ctx context.Context, cfg *config.Config, sentences []*tbook.Senten
 	}
 	fmt.Printf("Flagged sources written to %s\n", flaggedPath)
 	if cfg.JudgeInvalidate {
-		n := cache.Invalidate(cfg.CacheDir, rep.FlaggedSrcs, cfg.Targets, cfg.Source, cfg.Model)
+		n := 0
+		for _, g := range glossaries {
+			n += cache.Invalidate(cfg.CacheDir, rep.FlaggedSrcs, []string{g.target}, cfg.Source,
+				g.cacheModel, finalModel(cfg, g.cacheModel), repairModel(cfg, g.cacheModel))
+		}
 		fmt.Printf("Invalidated %d cache file(s) — re-run (optionally with a stronger --model) to redo them.\n", n)
 	} else if cfg.EscalateModel == "" {
 		fmt.Printf("Re-do them with: convert --invalidate %s && convert …\n", flaggedPath)
@@ -1046,6 +1214,30 @@ func runJudge(ctx context.Context, cfg *config.Config, sentences []*tbook.Senten
 
 // loadSrcList reads source sentences from a file: a JSON array of strings, or
 // (fallback) one non-empty source sentence per line.
+// loadInvalidateList reads a --invalidate file in either shape: a JSON array of
+// source sentences (lexcheck/judge reports), which applies to every target of
+// this run, or an object {target: [sentences]} (the language report), which
+// applies per target.
+func loadInvalidateList(path string, targets []string) (map[string][]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var byTarget map[string][]string
+	if json.Unmarshal(b, &byTarget) == nil {
+		return byTarget, nil
+	}
+	var srcs []string
+	if err := json.Unmarshal(b, &srcs); err != nil {
+		return nil, fmt.Errorf("want a JSON array of sentences or an object of {language: [sentences]}: %w", err)
+	}
+	out := make(map[string][]string, len(targets))
+	for _, t := range targets {
+		out[t] = srcs
+	}
+	return out, nil
+}
+
 func loadSrcList(path string) ([]string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

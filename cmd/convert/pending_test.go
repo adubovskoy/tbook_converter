@@ -69,26 +69,26 @@ func TestPendingSeesProofreadWorkOverAnUnrepairedCache(t *testing.T) {
 	seedFinal(t, dir, pendingModel, sentences)
 
 	plain := pendingCfg(dir, false, 0)
-	if got := pendingFinal(plain, sentences, pendingModel); got != 0 {
+	if got := pendingFinal(plain, sentences, plain.Targets, pendingModel); got != 0 {
 		t.Errorf("without --repair the cache is complete: pendingFinal = %d, want 0", got)
 	}
 
 	rep := pendingCfg(dir, true, 0)
-	if got := pendingFinal(rep, sentences, pendingModel); got != len(sentences) {
+	if got := pendingFinal(rep, sentences, rep.Targets, pendingModel); got != len(sentences) {
 		t.Errorf("with --repair every sentence still needs the pass: pendingFinal = %d, want %d",
 			got, len(sentences))
 	}
-	if got := pendingRaw(rep, sentences, pendingModel); got != 0 {
+	if got := pendingRaw(rep, sentences, rep.Targets, pendingModel); got != 0 {
 		t.Errorf("raw translations are cached: pendingRaw = %d, want 0", got)
 	}
-	if got := pendingRepair(rep, sentences, pendingModel); got != len(sentences) {
+	if got := pendingRepair(rep, sentences, rep.Targets, pendingModel); got != len(sentences) {
 		t.Errorf("no proofread text cached yet: pendingRepair = %d, want %d", got, len(sentences))
 	}
 	// align-mode emb aligns locally, but the proofread pass still needs the LLM.
-	if got := pendingText(rep, sentences, pendingModel); got != len(sentences) {
+	if got := pendingText(rep, sentences, rep.Targets, pendingModel); got != len(sentences) {
 		t.Errorf("pendingText = %d, want %d", got, len(sentences))
 	}
-	if got := pendingPhaseVerb(rep, sentences, pendingModel); got != "Proofreading" {
+	if got := pendingPhaseVerb(rep, sentences, []*glossaryNS{{target: "ru", cacheModel: pendingModel}}); got != "Proofreading" {
 		t.Errorf("phase verb = %q, want \"Proofreading\"", got)
 	}
 }
@@ -104,15 +104,15 @@ func TestPendingAfterProofreadIsOfflineAndContextScoped(t *testing.T) {
 	seedProofread(t, dir, repairModel(rep, pendingModel), sentences)
 	seedFinal(t, dir, finalModel(rep, pendingModel), sentences)
 
-	if got := pendingFinal(rep, sentences, pendingModel); got != 0 {
+	if got := pendingFinal(rep, sentences, rep.Targets, pendingModel); got != 0 {
 		t.Errorf("a repaired cache re-assembles offline: pendingFinal = %d, want 0", got)
 	}
-	if got := pendingText(rep, sentences, pendingModel); got != 0 {
+	if got := pendingText(rep, sentences, rep.Targets, pendingModel); got != 0 {
 		t.Errorf("no text work left: pendingText = %d, want 0", got)
 	}
 
 	ctx2 := pendingCfg(dir, true, 2)
-	if got := pendingFinal(ctx2, sentences, pendingModel); got != len(sentences) {
+	if got := pendingFinal(ctx2, sentences, ctx2.Targets, pendingModel); got != len(sentences) {
 		t.Errorf("--context 2 is its own namespace: pendingFinal = %d, want %d",
 			got, len(sentences))
 	}
@@ -127,11 +127,11 @@ func TestPendingPhaseVerbAligning(t *testing.T) {
 	seedRaw(t, dir, pendingModel, sentences)
 	seedProofread(t, dir, repairModel(rep, pendingModel), sentences)
 
-	if got := pendingPhaseVerb(rep, sentences, pendingModel); got != "Aligning" {
+	if got := pendingPhaseVerb(rep, sentences, []*glossaryNS{{target: "ru", cacheModel: pendingModel}}); got != "Aligning" {
 		t.Errorf("phase verb = %q, want \"Aligning\"", got)
 	}
 	plain := pendingCfg(dir, false, 0)
-	if got := pendingPhaseVerb(plain, sentences, pendingModel); got != "Aligning" {
+	if got := pendingPhaseVerb(plain, sentences, []*glossaryNS{{target: "ru", cacheModel: pendingModel}}); got != "Aligning" {
 		t.Errorf("phase verb without repair = %q, want \"Aligning\"", got)
 	}
 }
