@@ -241,10 +241,10 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	}
 	needsGlossaryBuild := wantGlossary && !haveGlossFile
 
-	// Only the untranslated work needs the LLM; a fully-cached run assembles
+	// Only the unfinished work needs the LLM; a fully-cached run assembles
 	// offline (resume / re-assemble) without a key or CLI.
 	countPending := func() int {
-		return translate.CountPending(translatable, cfg.Targets, cfg.CacheDir, cfg.Source, cacheModel, cfg.Force)
+		return pendingFinal(cfg, translatable, cacheModel)
 	}
 	needAPI := countPending() > 0 || needsGlossaryBuild || cfg.Judge
 	switch {
@@ -252,9 +252,8 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		// The run stops after the glossary pass: only building one needs the LLM.
 		needAPI = needsGlossaryBuild
 	case cfg.AlignMode == config.AlignEmb && !needsGlossaryBuild && !cfg.Judge:
-		// emb aligns locally: only the translate phase needs the LLM.
-		needAPI = translate.CountPendingTranslate(translatable, cfg.Targets, cfg.CacheDir,
-			cfg.Source, cacheModel, cfg.Force) > 0
+		// emb aligns locally: only the text passes need the LLM.
+		needAPI = pendingText(cfg, translatable, cacheModel) > 0
 	}
 	var client *translate.Client
 	if needAPI {
@@ -350,7 +349,8 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		case config.ProviderLlamaCpp:
 			via = cfg.Model + " (llama.cpp at " + cfg.BaseURL + ")"
 		}
-		fmt.Printf("Translating %s→%s via %s ...\n", cfg.Source, strings.Join(cfg.Targets, ","), via)
+		fmt.Printf("%s %s→%s via %s ...\n", pendingPhaseVerb(cfg, translatable, cacheModel),
+			cfg.Source, strings.Join(cfg.Targets, ","), via)
 		if cfg.Repair {
 			fmt.Println("Proofread pass ON (one extra LLM pass over every translation before aligning).")
 			if cfg.RepairContext > 0 {
@@ -800,6 +800,49 @@ func finalModel(cfg *config.Config, cacheModel string) string {
 		return translate.RepairCacheModel(cacheModel, cfg.RepairContext)
 	}
 	return cacheModel
+}
+
+// pendingFinal counts the (sentence,target) pairs with no cached FINAL entry
+// for THIS run's settings — the work that stands between the cache and an
+// assembled book. It must count in the namespace assembly later READS from:
+// with --repair that is the proofread-marked one, so adding the pass to an
+// already-translated book sees the pass as work instead of reporting the book
+// as fully cached and assembling it empty.
+func pendingFinal(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) int {
+	return translate.CountPending(sentences, cfg.Targets, cfg.CacheDir, cfg.Source,
+		finalModel(cfg, cacheModel), cfg.Force)
+}
+
+// pendingRaw counts pairs with no cached pass-1 translation, pendingRepair the
+// ones with no cached proofread rewrite (always 0 when the run does not
+// proofread). pendingText is the larger of the two: the sentences that still
+// need an LLM TEXT pass, which with --align-mode emb (local aligner) is the
+// whole API bill.
+func pendingRaw(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) int {
+	return translate.CountPendingTranslate(sentences, cfg.Targets, cfg.CacheDir, cfg.Source,
+		cacheModel, cfg.Force)
+}
+
+func pendingRepair(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) int {
+	return translate.CountPendingRepair(sentences, cfg.Targets, cfg.CacheDir, cfg.Source,
+		repairModel(cfg, cacheModel), cfg.Force)
+}
+
+func pendingText(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) int {
+	return max(pendingRaw(cfg, sentences, cacheModel), pendingRepair(cfg, sentences, cacheModel))
+}
+
+// pendingPhaseVerb names the first phase that actually needs the LLM, so a
+// re-run over a filled cache does not announce "Translating" when every raw
+// translation is already there and only the proofread or align pass is left.
+func pendingPhaseVerb(cfg *config.Config, sentences []*tbook.Sentence, cacheModel string) string {
+	switch {
+	case pendingRaw(cfg, sentences, cacheModel) > 0:
+		return "Translating"
+	case pendingRepair(cfg, sentences, cacheModel) > 0:
+		return "Proofreading"
+	}
+	return "Aligning"
 }
 
 // repairModel is the cache namespace of the PROOFREAD text — empty when the run

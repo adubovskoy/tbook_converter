@@ -1042,6 +1042,35 @@ func CountPendingTranslate(sentences []*tbook.Sentence, targets []string, cacheD
 	return pending
 }
 
+// CountPendingRepair returns how many unique (sentence,target) pairs have no
+// cached PROOFREAD text yet — the work the pass 1.5 (--repair) still owes. The
+// model component is the proofread-TEXT namespace (RepairTextCacheModel); an
+// empty one means the run does not proofread, so nothing is pending.
+func CountPendingRepair(sentences []*tbook.Sentence, targets []string, cacheDir, source, model string, force bool) int {
+	if model == "" {
+		return 0
+	}
+	seen := map[string]bool{}
+	pending := 0
+	for _, target := range targets {
+		for _, s := range sentences {
+			key := cache.RepairKey(s.Src, source, target, model)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if force {
+				pending++
+				continue
+			}
+			if rp, ok := cache.Read(cacheDir, key); !ok || suspiciousTranslation(rp.Text) {
+				pending++
+			}
+		}
+	}
+	return pending
+}
+
 // FillFromCache populates each sentence's tr[target] from the cache. A sentence
 // with no final aligned entry falls back to its raw pass-1 translation with an
 // empty alignment (translated, no highlights) — better than shipping it
