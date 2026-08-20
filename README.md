@@ -220,8 +220,16 @@ you the proofread pass.
 
 ### On a metered provider (OpenRouter)
 
-The defaults are the measured optimum for cost/speed and need no tuning. If you
-want the quality recipe there anyway, add `--repair --context 2`: it roughly
+The defaults are the measured optimum for cost/speed and need no tuning. The one
+lever worth paying for is the model: `--model google/gemini-3.7-flash` wins
+**59.9% of decisive blind pairs** against the default `gemini-3.1-flash-lite`
+(p=0.016, replicated on two disjoint 200-pair rounds) at the same speed and
+~$1.4 instead of ~$1.1 per book — the terminology misses are what it fixes
+([report](bench-quality/reports/four-model-bench-2026-08.md)). It mandates
+reasoning, which the client handles by itself (one rejected request per run,
+then the cheapest effort tier, 0 reasoning tokens).
+
+If you want the quality recipe there anyway, add `--repair --context 2`: it roughly
 doubles token cost (the context adds ~50% input tokens on top of a whole extra
 pass) and buys less than on gonka, because gemini-class models make far fewer of
 the agreement and non-word errors the pass exists to fix. Measure before paying
