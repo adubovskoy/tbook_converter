@@ -17,6 +17,12 @@ import argparse, json, random, sys, zipfile
 
 
 def texts(path):
+    """src -> translation, from a .tbook or from an arm's JSON [{src, tr}] dump
+    (what gloss_scale_probe.py writes — those arms are not .tbook files)."""
+    if path.endswith('.json'):
+        rows = json.load(open(path, encoding='utf-8'))
+        return {r['src'].strip(): (r.get('tr') or '').strip()
+                for r in rows if r.get('src') and (r.get('tr') or '').strip()}
     out = {}
     with zipfile.ZipFile(path) as z:
         for n in sorted(z.namelist()):
