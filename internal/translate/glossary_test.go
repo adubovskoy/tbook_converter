@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +46,45 @@ func TestGlossaryFileRoundTrip(t *testing.T) {
 	}
 	if GlossHash(got) != GlossHash(in) {
 		t.Fatal("hash changed across a round trip: the cache namespace would move for no reason")
+	}
+}
+
+// The gender annotation is user-editable, so it has to survive the sidecar
+// round trip untouched — and the file must stay readable by a build that has no
+// idea the fields exist.
+func TestGlossaryFileRoundTripsGender(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "g.json")
+	in := []GlossEntry{
+		{Src: "Ortega", Tgt: "Ортега", Gender: "f", Kind: "person"},
+		{Src: "Bancroft", Tgt: "Бэнкрофт", Kind: "person"}, // deliberately unstated
+		{Src: "neurachem", Tgt: "нейрохим"},
+	}
+	if err := WriteGlossaryFile(path, testScope(), in); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := LoadGlossaryFile(path, testScope())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(got) != len(in) {
+		t.Fatalf("got %d entries, want %d", len(got), len(in))
+	}
+	for i := range in {
+		if got[i] != in[i] {
+			t.Errorf("entry %d: got %+v, want %+v", i, got[i], in[i])
+		}
+	}
+	if GlossHash(got) != GlossHash(in) {
+		t.Error("hash changed across the round trip: the cache namespace would move for no reason")
+	}
+	// An entry with no gender must not gain one, and the file must not carry an
+	// empty field a user could mistake for a value.
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), `"gender"`); n != 1 {
+		t.Errorf("the file should mention \"gender\" exactly once, found %d:\n%s", n, b)
 	}
 }
 

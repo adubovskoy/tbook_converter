@@ -27,6 +27,17 @@ import (
 // match-by-text.)
 const PromptVersion = "v8"
 
+// GlossPromptVersion keys the GLOSSARY BUILD contract: the builder's prompt,
+// the candidate mining, and the entry gates. It used to be keyed by
+// PromptVersion, which had it backwards — an align-only change regenerated the
+// glossary (and, through the glossary hash, re-translated the book), while a
+// change to the glossary prompt itself was not picked up at all. Bumping this
+// rebuilds glossaries and therefore re-translates; bump it deliberately.
+// g1 = frequency-mined candidates + render pass with echoed terms + entry
+// gates + optional gender annotation (see bench-quality/reports/
+// glossary-scale-and-gender.md).
+const GlossPromptVersion = "g1"
+
 // TrPromptVersion keys the TRANSLATE (pass 1) contract separately, so an
 // align-only contract change re-aligns the book without re-translating it.
 // Bump only if the translation prompt/rules change.
@@ -54,7 +65,12 @@ func TrKey(src, source, target, model string) string {
 // without re-translating them. r1 = the adopted recipe — grammar, calqued
 // expressions, register and fidelity, with the book glossary injected and no
 // context-free guessing of gender, referents or recurring terms.
-const RepairPromptVersion = "r1"
+// r2 = the glossary block may carry [male]/[female] tags, and the context-free
+// rule now has a carve-out for them: a tagged person's gender is a fact for the
+// whole book, so the proofreader must make the sentence agree with it instead of
+// leaving it alone. Unlike the translate-pass tag (measured: 45% -> 98%
+// agreement), this carve-out is not separately measured.
+const RepairPromptVersion = "r2"
 
 // RepairKey returns the cache key for a sentence's PROOFREAD translation, the
 // text the align pass consumes when repair is on. Its own namespace ("|rp|")

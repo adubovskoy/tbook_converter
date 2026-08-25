@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dimando/reader/converter/internal/cache"
@@ -17,32 +18,140 @@ import (
 	"github.com/dimando/reader/converter/internal/tbook"
 )
 
-// GlossEntry is one enforced term translation.
+// GlossEntry is one enforced term translation. Gender and Kind are optional
+// annotations produced by the render pass (see glossrender.go); an entry
+// without them behaves exactly as entries did before they existed, and a
+// hand-edited sidecar may set or clear them freely.
 type GlossEntry struct {
 	Src string `json:"src"`
 	Tgt string `json:"tgt"`
+	// Gender is "m" or "f" for a NAMED INDIVIDUAL whose gender the source does
+	// not mark, so the target can agree with it. Empty means "unknown, do not
+	// state" — the safe default: a wrong gender is worse than none, because it
+	// forces the wrong agreement on every sentence about that character.
+	Gender string `json:"gender,omitempty"`
+	// Kind is "person" | "place" | "org" | "thing"; only "person" may carry a
+	// gender.
+	Kind string `json:"kind,omitempty"`
 }
 
 // glossarySampleMax caps how many sentences are sent to the model when
-// building the glossary (spread evenly across the book).
+// building the glossary (spread evenly across the book). Deliberately NOT
+// raised: measured on two books, 600 and 1200 sampled sentences return the same
+// 20-34 entries as 200 and cost 3-6x the build prompt — the sample pass answers
+// "name the key terms" with a short curated list whatever it is shown, which is
+// why complete coverage comes from local mining instead (glossmine.go).
 const glossarySampleMax = 200
 
-// BuildGlossary asks the model for a book-wide glossary — recurring key terms
-// and proper nouns whose translation must stay consistent across chapters —
-// and caches it on disk. Returns the entries plus a short hash that namespaces
-// the per-sentence translation cache while the glossary is enforced (a changed
-// glossary must not reuse translations made under a different one).
-func BuildGlossary(ctx context.Context, c *Client, cacheDir string, sentences []*tbook.Sentence,
-	source, target, title, author string) ([]GlossEntry, string, error) {
+// glossarySampleCap is how many entries the sample pass may return, and
+// defaultGlossaryMax how many the merged glossary keeps. 300 is 1.5x the
+// measured demand of a 15k-sentence novel (~200 terms) and far below anything
+// that costs adherence: 244 and 1392 entries both score 98.6%, and 1148
+// irrelevant entries around the real ones change nothing. What it does cost is
+// ~9 prompt tokens per entry on every batch of every pass that carries the
+// glossary.
+const (
+	glossarySampleCap  = 120
+	defaultGlossaryMax = 300
+)
 
-	bookKey := fmt.Sprintf("%s|%s|%d", title, author, len(sentences))
-	sum := sha256.Sum256([]byte(cache.PromptVersion + "|glossary|" + c.Model() + "|" + source + "|" + target + "|" + bookKey))
-	cachePath := filepath.Join(cacheDir, "glossary-"+hex.EncodeToString(sum[:])+".json")
+// GlossaryBuild carries everything BuildGlossary needs beyond the sentences.
+type GlossaryBuild struct {
+	CacheDir string
+	Source   string
+	Target   string
+	Title    string
+	Author   string
+
+	// Lexicon, when non-nil, enables coined-term mining: a frequent lowercase
+	// word the bilingual lexicon does not know is invented terminology
+	// (neurachem, needlecast). Without it only names are mined.
+	Lexicon Lexicon
+
+	// Gender annotates named individuals so the target can agree with them.
+	// Ignored for targets that do not mark gender (GenderMarkingTarget).
+	Gender bool
+
+	// Max caps the merged glossary; 0 means defaultGlossaryMax.
+	Max int
+}
+
+// Lexicon is the part of lexcheck.Dict the coined-term detector needs: does the
+// bilingual dictionary know this source word at all?
+type Lexicon interface {
+	Covered(srcWord string) bool
+}
+
+// BuildGlossary produces the book-wide glossary — recurring key terms, proper
+// nouns and invented terminology whose translation must stay consistent across
+// chapters — and caches it on disk. Returns the entries plus a short hash that
+// namespaces the per-sentence translation cache while the glossary is enforced
+// (a changed glossary must not reuse translations made under a different one).
+//
+// Two sources, because measurement showed neither is sufficient:
+//
+//   - the SAMPLE pass asks the model for the key terms of a 200-sentence sample.
+//     It is the only thing that finds ordinary words used in a book-specific
+//     sense ("stack", "hull"), and it cannot enumerate: on two books it returned
+//     18-34 entries whatever cap it was given, missing characters with 147 and
+//     even 1031 occurrences.
+//   - local frequency MINING enumerates names and coined terms exhaustively and
+//     for free; one render call then filters and translates the candidates
+//     ($0.01/book) and annotates gender.
+//
+// Full numbers: bench-quality/reports/glossary-scale-and-gender.md.
+func BuildGlossary(ctx context.Context, c *Client, sentences []*tbook.Sentence,
+	o GlossaryBuild) ([]GlossEntry, string, error) {
+
+	bookKey := fmt.Sprintf("%s|%s|%d", o.Title, o.Author, len(sentences))
+	key := cache.GlossPromptVersion + "|glossary|" + c.Model() + "|" + o.Source + "|" +
+		o.Target + "|" + bookKey + "|" + strconv.FormatBool(o.wantGender())
+	sum := sha256.Sum256([]byte(key))
+	cachePath := filepath.Join(o.CacheDir, "glossary-"+hex.EncodeToString(sum[:])+".json")
 
 	var entries []GlossEntry
 	if b, err := os.ReadFile(cachePath); err == nil && json.Unmarshal(b, &entries) == nil {
 		return entries, GlossHash(entries), nil
 	}
+
+	sample, sampleErr := buildSampleGlossary(ctx, c, sentences, o)
+	if sampleErr != nil {
+		return nil, "", sampleErr
+	}
+	mined, minedErr := buildMinedGlossary(ctx, c, sentences, o)
+	if minedErr != nil {
+		// Mining is an improvement, not a dependency: a failed render call must
+		// not cost the book its glossary, so fall back to the sample pass.
+		fmt.Printf("Glossary [%s]: mined pass failed (%v) — using the sampled terms only\n",
+			o.Target, minedErr)
+	}
+	entries = mergeGlossaries(sample, mined, o)
+
+	if err := os.MkdirAll(o.CacheDir, 0o755); err == nil {
+		if b, err := jsonx.Marshal(entries); err == nil {
+			_ = os.WriteFile(cachePath, b, 0o644)
+		}
+	}
+	return entries, GlossHash(entries), nil
+}
+
+// wantGender reports whether this build annotates gender: asked for, and the
+// target actually marks it.
+func (o GlossaryBuild) wantGender() bool {
+	return o.Gender && GenderMarkingTarget(o.Target)
+}
+
+func (o GlossaryBuild) max() int {
+	if o.Max > 0 {
+		return o.Max
+	}
+	return defaultGlossaryMax
+}
+
+// buildSampleGlossary is the original pass: one call over an even sample of the
+// book. Its unique contribution is ordinary words used in a book-specific sense.
+func buildSampleGlossary(ctx context.Context, c *Client, sentences []*tbook.Sentence,
+	o GlossaryBuild) ([]GlossEntry, error) {
 
 	step := max(1, len(sentences)/glossarySampleMax)
 	var sample []string
@@ -53,34 +162,68 @@ func BuildGlossary(ctx context.Context, c *Client, cacheDir string, sentences []
 		}
 	}
 	userJSON, err := jsonx.Marshal(map[string]any{
-		"title": title, "author": author, "sentences": sample,
+		"title": o.Title, "author": o.Author, "sentences": sample,
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-
 	var out struct {
 		Glossary []GlossEntry `json:"glossary"`
 	}
-	sys := glossarySystemPrompt(LangName(source), LangName(target))
+	sys := glossarySystemPrompt(LangName(o.Source), LangName(o.Target))
 	if err := c.ChatJSON(WithPhase(ctx, "glossary"), sys, string(userJSON), &out); err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	// Keep only usable entries, deterministic order.
+	entries := make([]GlossEntry, 0, len(out.Glossary))
 	for _, e := range out.Glossary {
 		e.Src, e.Tgt = strings.TrimSpace(e.Src), strings.TrimSpace(e.Tgt)
 		if e.Src != "" && e.Tgt != "" {
 			entries = append(entries, e)
 		}
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Src < entries[j].Src })
+	if len(entries) > glossarySampleCap {
+		entries = entries[:glossarySampleCap]
+	}
+	return entries, nil
+}
 
-	if err := os.MkdirAll(cacheDir, 0o755); err == nil {
-		if b, err := jsonx.Marshal(entries); err == nil {
-			_ = os.WriteFile(cachePath, b, 0o644)
+// mergeGlossaries combines the two sources, applies the entry gates and the
+// cap, and returns a deterministically ordered glossary. Mined entries win ties
+// because they carry frequency, kind and gender; a sample entry whose head word
+// a mined entry already covers is dropped (phrase entries are followed only 62%
+// of the time against 95% for head terms, and they crowd out real ones).
+func mergeGlossaries(sample, mined []GlossEntry, o GlossaryBuild) []GlossEntry {
+	seen := make(map[string]bool, len(sample)+len(mined))
+	kept := make([]GlossEntry, 0, len(sample)+len(mined))
+	add := func(list []GlossEntry) {
+		for _, e := range list {
+			k := strings.ToLower(e.Src)
+			if seen[k] || !acceptGlossEntry(e, o.Source, o.Target) {
+				continue
+			}
+			seen[k] = true
+			if !o.wantGender() {
+				e.Gender = ""
+			}
+			kept = append(kept, e)
 		}
 	}
-	return entries, GlossHash(entries), nil
+	add(mined)
+	add(sample)
+	// Deterministic, and short entries first so the cap keeps head terms over
+	// the phrases that survived.
+	sort.SliceStable(kept, func(i, j int) bool {
+		wi, wj := len(strings.Fields(kept[i].Src)), len(strings.Fields(kept[j].Src))
+		if wi != wj {
+			return wi < wj
+		}
+		return kept[i].Src < kept[j].Src
+	})
+	if len(kept) > o.max() {
+		kept = kept[:o.max()]
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].Src < kept[j].Src })
+	return kept
 }
 
 // GlossaryScope identifies the book and language pair a glossary was built
@@ -166,7 +309,9 @@ func WriteGlossaryFile(path string, scope GlossaryScope, entries []GlossEntry) e
 }
 
 // GlossHash is a short stable digest of the glossary content, used as a
-// translation-cache namespace component.
+// translation-cache namespace component. Gender is part of the digest: it
+// changes the prompt, so a translation made under a different gender annotation
+// must not be reused. Kind is not — it never reaches the prompt.
 func GlossHash(entries []GlossEntry) string {
 	if len(entries) == 0 {
 		return ""
@@ -176,6 +321,10 @@ func GlossHash(entries []GlossEntry) string {
 		sb.WriteString(e.Src)
 		sb.WriteByte('=')
 		sb.WriteString(e.Tgt)
+		if e.Gender != "" {
+			sb.WriteByte('/')
+			sb.WriteString(e.Gender)
+		}
 		sb.WriteByte('\n')
 	}
 	sum := sha256.Sum256([]byte(sb.String()))
@@ -191,7 +340,16 @@ You receive JSON {title, author, sentences} — a sample of the book's sentences
 Return the KEY RECURRING TERMS whose {TGT} translation must stay consistent across
 the whole book: domain terminology, recurring concepts, and proper nouns that get
 transliterated or translated. Skip everyday words and terms with only one obvious
-translation. At most 40 entries.
+translation.
+
+Most valuable here are ORDINARY {SRC} WORDS THE BOOK USES IN ITS OWN SENSE — a
+common word that means something specific in this book (a "stack" that stores a
+mind, a "sleeve" that is a body). Nothing else can find those.
+
+Give the HEAD TERM, never a phrase built around it: "Suntouch", not "Suntouch House";
+"stack", not "cortical stack storage". One entry per term, in its base form
+(nominative singular). A phrase whose head word is already an entry is not an entry.
+At most ` + strconv.Itoa(glossarySampleCap) + ` entries.
 
 Reply with ONLY a JSON object: {"glossary":[{"src":"<{SRC} term>","tgt":"<{TGT} translation>"}, …]}.
 No code fences, no commentary.`)

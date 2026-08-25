@@ -47,19 +47,47 @@ For EACH sentence, write a faithful, natural literary {TGT} translation of src:
 
 Reply with ONLY a single JSON object mapping each "id" (exact string) to its {TGT}
 translation as a STRING. No code fences, no commentary. Translate EVERY sentence.`)
+	return base + glossaryBlock(targetName, glossary)
+}
+
+// glossaryBlock renders the enforced-terminology section shared by the translate
+// and proofread prompts. Entries carrying a gender get a [male] / [female] tag
+// and the block gains one line explaining it.
+//
+// The tag is what tells the model a fact the sentence cannot: which gender the
+// words around a character must agree with. Measured en→ru on text the model
+// cannot recognise, agreement went from 45% to 98% (fixed 32, broke 1,
+// p=7.9e-09; replicated on a second book: 41% → 99%, fixed 150, broke 0). It
+// costs ~4 tokens per tagged entry and changes nothing else — adherence to the
+// glossary is identical with and without it. On a book the model KNOWS the tag
+// is redundant (a cast list identifies the novel and it recalls the genders
+// itself), which is why this was measured on de-identified text. See
+// bench-quality/reports/glossary-scale-and-gender.md §4.
+func glossaryBlock(targetName string, glossary []GlossEntry) string {
 	if len(glossary) == 0 {
-		return base
+		return ""
 	}
+	gendered := glossaryHasGender(glossary)
 	var sb strings.Builder
-	sb.WriteString(base)
 	sb.WriteString("\n\nGLOSSARY — use these ")
 	sb.WriteString(targetName)
 	sb.WriteString(" translations consistently wherever the term appears:\n")
+	if gendered {
+		sb.WriteString("A [male] / [female] tag gives the gender of the person that term refers to. " +
+			"Every " + targetName + " word that agrees with that person — past-tense verb, adjective, " +
+			"participle, pronoun — must take that gender, even where the source does not mark it.\n")
+	}
 	for _, e := range glossary {
 		sb.WriteString("- ")
 		sb.WriteString(e.Src)
 		sb.WriteString(" → ")
 		sb.WriteString(e.Tgt)
+		switch e.Gender {
+		case "m":
+			sb.WriteString("  [male]")
+		case "f":
+			sb.WriteString("  [female]")
+		}
 		sb.WriteString("\n")
 	}
 	return sb.String()
@@ -124,7 +152,8 @@ exactly as it is — an unsupported change there is a guess, and guessing breaks
 You see ONE sentence at a time with no surrounding context: never "correct" the gender of a
 person, the referent of a pronoun, or a recurring term just because it looks unexpected —
 without the context that decided it, such a change is a guess, and guessing here breaks the
-book.`)
+book. The one exception is a person the GLOSSARY below tags with a gender: that is context,
+supplied for the whole book, and tr must agree with it.`)
 	}
 	base += ` MOST ITEMS NEED NO CHANGE — then return tr exactly as given.`
 	if len(glossary) > 0 {
@@ -134,11 +163,22 @@ book.`)
 		sb.WriteString(targetName)
 		sb.WriteString(" renderings are enforced across the whole book. They are CORRECT by\n")
 		sb.WriteString("decision, even where a different word looks more literal — never change them:\n")
+		if glossaryHasGender(glossary) {
+			sb.WriteString("A [male] / [female] tag gives the gender of the person that term refers to. It is\n")
+			sb.WriteString("a FACT about the book, not a guess: where tr makes a verb, adjective, participle or\n")
+			sb.WriteString("pronoun agree with that person in the other gender, FIX it.\n")
+		}
 		for _, e := range glossary {
 			sb.WriteString("- ")
 			sb.WriteString(e.Src)
 			sb.WriteString(" → ")
 			sb.WriteString(e.Tgt)
+			switch e.Gender {
+			case "m":
+				sb.WriteString("  [male]")
+			case "f":
+				sb.WriteString("  [female]")
+			}
 			sb.WriteString("\n")
 		}
 		base = strings.TrimRight(sb.String(), "\n")
@@ -147,6 +187,17 @@ book.`)
 
 Reply with ONLY a single JSON object mapping each "id" (exact string) to the final {TGT}
 sentence as a STRING. No code fences, no commentary. Output EVERY item.`)
+}
+
+// glossaryHasGender reports whether any entry states a gender, i.e. whether the
+// prompt needs the line that explains the tag.
+func glossaryHasGender(glossary []GlossEntry) bool {
+	for _, e := range glossary {
+		if e.Gender == "m" || e.Gender == "f" {
+			return true
+		}
+	}
+	return false
 }
 
 // alignSystemPrompt is pass 2 — align only, given the finished translation. The

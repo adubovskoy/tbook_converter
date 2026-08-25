@@ -70,6 +70,7 @@ type Config struct {
 
 	// Quality passes.
 	Glossary        bool   // build a book glossary and enforce it during translation (default on; --no-glossary disables)
+	GlossaryGender  bool   // annotate glossary persons with gender so the target agrees with them (default on for targets that mark gender; --no-glossary-gender disables)
 	OnlyGlossary    bool   // build/load the glossary, write it to <out>.glossary.<src>-<tgt>.json and open it for editing, then exit before translating (with Force: rebuild it, discarding edits)
 	Repair          bool   // proofread pass between translate and align (default on for gonka only; --repair/--no-repair override)
 	RepairContext   int    // with the proofread pass: send the N preceding sentences (+ their translations) as read-only context; 0 = off, 2 = measured best, 1 = never (see README)
@@ -171,6 +172,11 @@ func Load(args []string) (*Config, error) {
 	// whose keys carry no glossary hash). --glossary is kept as an accepted no-op.
 	_ = fs.Bool("glossary", true, "(default; deprecated) build a book glossary and enforce it during translation — on unless --no-glossary")
 	noGlossary := fs.Bool("no-glossary", envBool("NO_GLOSSARY", false), "skip the book glossary (also reuses caches from pre-glossary runs)")
+	// The [male]/[female] tag is measured at +53 pp of gender agreement on
+	// gender-critical sentences and costs ~4 tokens per tagged entry; the switch
+	// exists because it rewrites the glossary block of every request.
+	noGlossGender := fs.Bool("no-glossary-gender", envBool("NO_GLOSSARY_GENDER", false),
+		"do not tag glossary characters with [male]/[female] (the tag makes verbs and adjectives agree with a character whose gender the source never states)")
 	onlyGlossary := fs.Bool("only-glossary", false, "build (or load) the book glossary, write it to <out>.glossary.<src>-<tgt>.json, open it in your default JSON app, then exit — no translation runs; re-run normally afterward to translate using the (optionally edited) glossary, or with --force to rebuild it")
 	judge := fs.Bool("judge", false, "after translating, run an independent LLM judge over every sentence; write flagged sources to <out>.flagged.json")
 	judgeModel := fs.String("judge-model", envOr("JUDGE_MODEL", ""), "model for the judge pass (default: same as --model; see README before pointing it at a stronger model)")
@@ -261,6 +267,7 @@ func Load(args []string) (*Config, error) {
 		NoNotes:         *noNotes,
 		SkipCitations:   *skipCitations,
 		Glossary:        !*noGlossary,
+		GlossaryGender:  !*noGlossGender,
 		OnlyGlossary:    *onlyGlossary,
 		Repair:          *repair && !*noRepair,
 		RepairContext:   *repairContext,

@@ -295,6 +295,10 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// One lexicon loader for the whole run: the glossary miner and the hybrid
+	// align gate want the same per-target dictionaries.
+	lexDicts := lexDictLoader(cfg)
+
 	// Glossary pass: build the book glossary unless the sidecar already
 	// supplied one (loaded above, along with its cache namespace) — the hash
 	// namespaces the cache so translations made under a different glossary
@@ -302,8 +306,17 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	if wantGlossary {
 		for _, g := range glossaries {
 			if g.needsBuild {
-				entries, ghash, berr := translate.BuildGlossary(ctx, client, cfg.CacheDir, sentences,
-					cfg.Source, g.target, title, author)
+				// A missing lexicon only costs the coined-term class of
+				// candidates (names are mined without it), so a nil dict is
+				// fine — lexDictLoader already reports it.
+				entries, ghash, berr := translate.BuildGlossary(ctx, client, sentences,
+					translate.GlossaryBuild{
+						CacheDir: cfg.CacheDir,
+						Source:   cfg.Source, Target: g.target,
+						Title: title, Author: author,
+						Lexicon: glossLexicon(lexDicts(g.target)),
+						Gender:  cfg.GlossaryGender,
+					})
 				if berr != nil {
 					return fmt.Errorf("glossary %s→%s: %w", cfg.Source, g.target, berr)
 				}
@@ -376,7 +389,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 			case err == nil:
 				defer aligner.Close()
 				pipe.EmbAligner = aligner
-				pipe.LexDicts = lexDictLoader(cfg)
+				pipe.LexDicts = lexDicts
 				// EXPERIMENTAL (research-only): expression spans for the
 				// aligner's unit-glue step. Off unless --units-file is given.
 				if cfg.UnitsFile != "" {
@@ -703,12 +716,23 @@ func lexDictLoader(cfg *config.Config) func(target string) *lexcheck.Dict {
 		}
 		d, err := lexcheck.Load(cfg.LexiconDir, cfg.Source, target)
 		if err != nil || d == nil {
-			fmt.Printf("[%s] hybrid gate: no lexicon (%v) — gating on alignment coverage only\n", target, err)
+			fmt.Printf("[%s] no lexicon (%v) — the hybrid gate uses alignment coverage only "+
+				"and the glossary mines names only\n", target, err)
 			d = nil
 		}
 		dicts[target] = d
 		return d
 	}
+}
+
+// glossLexicon adapts a lexcheck dictionary to the glossary miner's interface,
+// turning a nil *Dict into a nil interface — assigning the typed nil directly
+// would make `Lexicon != nil` true and panic on the first lookup.
+func glossLexicon(d *lexcheck.Dict) translate.Lexicon {
+	if d == nil {
+		return nil
+	}
+	return d
 }
 
 // openGlossary launches the editor for the glossary sidecar. Indirected

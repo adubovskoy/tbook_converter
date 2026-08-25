@@ -35,14 +35,21 @@ A plain run does, in order:
 
 1. **Parse + segment** — chapters, images, tables, footnotes, emphasis
    preserved; front/back matter skipped; sentences tokenized with rune offsets.
-2. **Glossary** (1 extra call) — recurring terms + proper nouns, enforced in
-   every batch so names stay consistent. `--no-glossary` skips it (also needed
-   to reuse caches made before glossary became the default). The glossary is
-   written to `<out>.glossary.<src>-<tgt>.json` next to the output and reused
-   verbatim on every later run of the same book and language pair — edit it by
-   hand (or run `--only-glossary` first, see below) to control how specific
-   terms/names are rendered before translating. Editing it moves the cache
-   namespace, so the affected sentences are re-translated.
+2. **Glossary** (~8 extra calls, under $0.02) — recurring terms + proper nouns,
+   enforced in every batch so names stay consistent. Built from two sources:
+   one call over a 200-sentence sample (the only thing that finds ordinary words
+   the book uses in its own sense — a `stack` that stores a mind), plus **local
+   frequency mining** of the whole book for names and invented terminology,
+   whose candidates one render call filters and translates. Up to 300 entries;
+   a 15k-sentence novel needs ~200. Characters may carry a
+   `[male]`/`[female]` tag so verbs and adjectives agree with them in languages
+   that mark it — `--no-glossary-gender` turns that off. `--no-glossary` skips
+   the whole pass (also needed to reuse caches made before glossary became the
+   default). The glossary is written to `<out>.glossary.<src>-<tgt>.json` next to
+   the output and reused verbatim on every later run of the same book and
+   language pair — edit it by hand (or run `--only-glossary` first, see below) to
+   control how specific terms/names are rendered before translating. Editing it
+   moves the cache namespace, so the affected sentences are re-translated.
 3. **Translate** — batches of 16, 32 requests in parallel.
 4. **Align** — free local LaBSE word alignment (`hybrid` mode); the ~4% of
    sentences the quality gate rejects are re-aligned by the LLM. Without the
@@ -126,6 +133,18 @@ Machine integration (for scripts and services driving the converter):
   is an interactive flag: it writes no `--progress-file` events, because it
   produces no `.tbook`.
 
+  An entry may carry two optional fields the build fills in: `"kind"`
+  (`person`/`place`/`org`/`thing`) and, for a named individual, `"gender"`
+  (`"m"`/`"f"`). The gender reaches the prompt as a `[male]`/`[female]` tag and
+  makes past-tense verbs, adjectives and pronouns agree with that character even
+  where the source never states their sex — measured en→ru on text the model
+  cannot recognise, agreement went from 45% to 98%
+  ([report](bench-quality/reports/glossary-scale-and-gender.md)). Fix a wrong one
+  by editing it, or delete the field to leave the gender unstated; a name shared
+  by characters of both genders is deliberately left untagged. Tags are rendered
+  only for targets that mark gender (ru, uk, pl, cs, es, fr, it, pt, ar, he, …),
+  and `--no-glossary-gender` disables them everywhere.
+
   The `source`/`target`/`title`/`author`/`sentences` fields at the top of the
   file scope it to one book and one language pair — a file that doesn't match
   the current run (a glossary built under `--limit-chapters`, say) is reported
@@ -160,7 +179,8 @@ serializes concurrency).
 Content: `--keep-matter`, `--skip-files pat1,pat2`, `--no-images`, `--no-notes`,
 `--skip-citations` (leave bibliographic footnotes untranslated).
 
-Quality: `--no-glossary`, `--only-glossary` (build/edit the glossary, see
+Quality: `--no-glossary`, `--no-glossary-gender` (drop the `[male]`/`[female]`
+tags), `--only-glossary` (build/edit the glossary, see
 above, then exit; `--force` rebuilds it), `--repair`/`--context N` (proofread
 pass, above), `--no-lexcheck`, `--judge` (semantic verification
 report, see below), `--judge-scope` (`flagged` default: suspects + a 5%
