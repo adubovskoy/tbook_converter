@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"encoding/json"
@@ -92,10 +92,7 @@ func runConvert(t *testing.T, baseURL string, args ...string) error {
 		t.Setenv("OPENROUTER_API_KEY", "test-key")
 	}
 
-	old := os.Args
-	os.Args = append([]string{"convert"}, args...)
-	t.Cleanup(func() { os.Args = old })
-	return run()
+	return Run(args)
 }
 
 // opened records the sidecar paths --only-glossary handed to the editor.
