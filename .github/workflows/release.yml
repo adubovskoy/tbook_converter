@@ -1,0 +1,177 @@
+name: Release
+
+# Cutting a release:
+#   1. bump `info.version` in cmd/convert-gui/build/config.yml, then
+#      `wails3 task common:update:build-assets` (propagates it into the Windows
+#      resources and the macOS Info.plist) and commit
+#   2. `git tag v<version> && git push origin v<version>`
+# The tag must match config.yml — the build job refuses to release otherwise.
+# The release is created as a draft; review the binaries and publish by hand.
+#
+# A manual run (workflow_dispatch) builds the same three binaries and leaves
+# them as run artifacts without creating a release — use it to smoke-test.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Keep in step with the wails/v3 version in go.mod.
+  WAILS_VERSION: v3.0.0-beta.15
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: linux-amd64
+            task: build
+            binary: tbook-converter
+          # macos-latest is arm64; lipo joins an amd64 build in so one binary
+          # covers Apple Silicon and Intel.
+          - os: macos-latest
+            asset: macos-universal
+            task: darwin:build:universal
+            binary: tbook-converter
+          - os: windows-latest
+            asset: windows-amd64.exe
+            task: build
+            binary: tbook-converter.exe
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          declared=$(sed -n 's/^  version: "\(.*\)"$/\1/p' cmd/convert-gui/build/config.yml)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [ "$version" != "$declared" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match config.yml version ${declared}" >&2
+              exit 1
+            fi
+          else
+            version="${declared}+dev.$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Building version ${version}"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cmd/convert-gui/frontend/package-lock.json
+
+      # The GUI links GTK4 + WebKitGTK 6.0 through cgo on Linux.
+      - name: Install GTK/WebKit headers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: Put GOPATH/bin on PATH
+        shell: bash
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install wails3
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+
+      - name: Install frontend dependencies
+        working-directory: cmd/convert-gui/frontend
+        run: npm ci
+
+      - name: Build GUI
+        working-directory: cmd/convert-gui
+        run: wails3 task ${{ matrix.task }} VERSION=${{ steps.version.outputs.version }}
+
+      - name: Name the binary for release
+        id: asset
+        shell: bash
+        working-directory: cmd/convert-gui/bin
+        run: |
+          set -euo pipefail
+          name="tbook-converter-${{ steps.version.outputs.version }}-${{ matrix.asset }}"
+          mv "${{ matrix.binary }}" "$name"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          ls -l "$name"
+
+      # Proves the binary starts and resolves its dynamic libraries; the
+      # embedded CLI's usage needs neither a display nor an API key.
+      - name: Smoke-test the binary
+        shell: bash
+        working-directory: cmd/convert-gui/bin
+        run: ./${{ steps.asset.outputs.name }} convert --help > /dev/null
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.asset.outputs.name }}
+          path: cmd/convert-gui/bin/${{ steps.asset.outputs.name }}
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          {
+            echo "## Install"
+            echo
+            echo "Desktop app for converting EPUB/FB2 books into \`.tbook\`. One binary per"
+            echo "platform; it also embeds the CLI (\`tbook-converter convert <args>\`)."
+            echo
+            echo '```bash'
+            echo "# Linux / macOS"
+            echo "chmod +x tbook-converter-*"
+            echo '```'
+            echo
+            echo "The binaries are unsigned: macOS needs"
+            echo "\`xattr -d com.apple.quarantine tbook-converter-*\` and Windows shows a"
+            echo "SmartScreen warning on first run."
+            echo
+            echo "Linux needs GTK4 and WebKitGTK 6.0 installed (\`libgtk-4-1\`,"
+            echo "\`libwebkitgtk-6.0-4\` on Debian/Ubuntu; \`gtk4\`, \`webkitgtk6.0\` on Fedora)."
+            echo
+          } > notes.md
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="${GITHUB_REF_NAME}" --jq .body >> notes.md || true
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --draft \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md
+          echo "Draft release ${GITHUB_REF_NAME} created — review and publish it."
