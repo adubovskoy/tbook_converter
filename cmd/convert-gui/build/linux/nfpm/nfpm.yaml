@@ -3,26 +3,26 @@
 #
 # The lines below are called `modelines`. See `:help modeline`
 
-name: "gui-spike"
+name: "tbook-converter"
 arch: ${GOARCH}
 platform: "linux"
 version: "0.1.0"
 section: "default"
 priority: "extra"
 maintainer: ${GIT_COMMITTER_NAME} <${GIT_COMMITTER_EMAIL}>
-description: "A gui-spike application"
-vendor: "My Company"
-homepage: "https://wails.io"
+description: "Convert EPUB/FB2 books into tap-to-translate .tbook files"
+vendor: "tbook"
+homepage: "https://github.com/adubovskoy/tbook_converter"
 license: "MIT"
 release: "1"
 
 contents:
-  - src: "./bin/gui-spike"
-    dst: "/usr/local/bin/gui-spike"
+  - src: "./bin/tbook-converter"
+    dst: "/usr/local/bin/tbook-converter"
   - src: "./build/appicon.png"
-    dst: "/usr/share/icons/hicolor/128x128/apps/gui-spike.png"
-  - src: "./build/linux/gui-spike.desktop"
-    dst: "/usr/share/applications/gui-spike.desktop"
+    dst: "/usr/share/icons/hicolor/128x128/apps/tbook-converter.png"
+  - src: "./build/linux/tbook-converter.desktop"
+    dst: "/usr/share/applications/tbook-converter.desktop"
 
 # Default dependencies for the GTK4 + WebKitGTK 6.0 stack (Ubuntu 24.04+ / Debian 13+)
 depends:
