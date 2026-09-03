@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep in step with the wails/v3 version in go.mod.
+  WAILS_VERSION: v3.0.0-beta.15
+
+jobs:
+  test:
+    name: Go tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # cmd/convert-gui links GTK4 + WebKitGTK 6.0 via cgo, so even `go vet`
+      # and `go test ./...` need the headers.
+      - name: Install GTK/WebKit headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - run: go vet ./...
+
+      - run: go test ./...
+
+      - name: Build CLI
+        run: make build VERSION=ci-${{ github.sha }}
+
+  gui:
+    name: GUI build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cmd/convert-gui/frontend/package-lock.json
+
+      - name: Install GTK/WebKit headers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: Put GOPATH/bin on PATH
+        shell: bash
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install wails3
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+
+      - name: Install frontend dependencies
+        working-directory: cmd/convert-gui/frontend
+        run: npm ci
+
+      # Bindings are the frontend's typed view of the Go service; svelte-check
+      # cannot resolve ./bindings/* without them. `wails3 task build` generates
+      # them too, so only the type-checking runner needs this step.
+      - name: Generate bindings
+        if: runner.os == 'Linux'
+        working-directory: cmd/convert-gui
+        run: wails3 generate bindings -f '-tags production' -clean=true
+
+      - name: Type-check frontend
+        if: runner.os == 'Linux'
+        working-directory: cmd/convert-gui/frontend
+        run: npm run check
+
+      - name: Build GUI
+        working-directory: cmd/convert-gui
+        run: wails3 task build VERSION=ci-${{ github.sha }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tbook-converter-${{ matrix.os }}
+          path: cmd/convert-gui/bin/tbook-converter*
+          if-no-files-found: error
+          retention-days: 14
