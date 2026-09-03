@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=tbook-converter
+Exec=tbook-converter
+Icon=tbook-converter
+Categories=Development;
+Terminal=false
+Keywords=wails
+Version=1.0
+StartupNotify=false

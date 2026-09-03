@@ -32,3 +32,6 @@ __pycache__/
 # sentence dumps. Kept on disk (the reports cite it and /tmp is wiped between
 # sessions) but never published: it is verbatim copyrighted book text.
 /bench-quality/.artifacts/
+
+# Go build output (GUI binary built straight into the repo root)
+/convert-gui

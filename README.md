@@ -409,13 +409,36 @@ cp book.tbook ../android/app/src/main/assets/sample.tbook
 
 The app also imports any `.tbook` at runtime via its file picker.
 
+## Desktop app (GUI)
+
+`cmd/convert-gui` is a [Wails v3](https://v3.wails.io) desktop app around the same pipeline:
+setup wizard for provider API keys (with test-connection and how-to-get-a-key guides), drag-in a
+book → estimate → convert with live progress and cost, a queue with history, and interrupt-safe
+resume from the shared cache. Settings and job history live in
+`~/.config/tbook-converter/`, cache and run logs in `~/.cache/tbook-converter/`.
+
+```bash
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.15   # once; Linux also needs
+                                                                    # webkit2gtk + gtk3 dev headers
+make gui-dev        # hot-reload development shell
+make gui-build      # production binary → cmd/convert-gui/bin/tbook-converter
+make gui-package    # platform packages (AppImage/deb/rpm, .app, NSIS)
+```
+
+The GUI binary embeds the full CLI — `tbook-converter convert <args>` behaves exactly like
+`convert <args>` — and re-execs itself that way for every conversion, so one file ships both.
+The GUI never reads `.env`: it passes credentials and absolute paths per run.
+
 ## Code layout
 
 ```
 cmd/convert        CLI entrypoint (flags, orchestration, --dry-run)
+cmd/convert-gui    Wails v3 desktop app (Svelte 5 frontend, self-execs the CLI)
 cmd/driftdemo      microscope: pipeline + lexcheck + judge on a small passage
 cmd/lexeval        lexcheck benchmark (synthetic drift injection on a .tbook)
 internal/buildinfo producer identity (version, VCS commit) for manifest.meta
+internal/cli       the convert command's implementation (cmd/convert is a thin wrapper)
+internal/gui       GUI backend: job queue, subprocess runner, key checks, pricing, settings
 internal/config    .env + flag resolution
 internal/embalign  local embedding word aligner (tools/embalign.py subprocess)
 internal/epub      EPUB → chapters of paragraph text
