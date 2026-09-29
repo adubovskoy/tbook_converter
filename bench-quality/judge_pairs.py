@@ -32,6 +32,17 @@ would call preference rather than a defect. Judge only the text you are shown;
 you have no wider context, so do not punish a choice that some other passage
 might justify.
 
+Quotation marks: every sentence is cut out of a longer paragraph, so a source
+sentence may open a quotation without closing it, close one it did not open, or
+sit inside a multi-sentence quotation with no marks at all. A translation whose
+quotation marks mirror the source sentence's marks (opening mark iff the source
+opens, closing mark iff the source closes, none if the source has none) is
+correct; never count such an open-only, close-only or unmarked cell as a defect,
+and never prefer a side for adding a complete pair the source sentence lacks.
+In French, the standard incise inside one guillemet pair
+(« Peu importe, dit Holmes, c'est mon métier. ») is correct, as is the
+dash-marked incise; neither is a defect.
+
 For the losing side, name its single worst defect class, one of:
 fidelity, grammar-agreement, case-government, nonexistent-word, idiom-calque,
 collocation, terminology, register, naturalness, punctuation, other.
@@ -54,7 +65,7 @@ def judge(batch_path, model, lang, attempts=3):
             time.sleep(30 * att)  # a rate-limited window needs waiting out, not an instant retry
         try:
             out = subprocess.run(
-                ["claude", "-p", "--model", model, "--tools", ""],
+                ["claude", "-p", "--model", model, "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}"],
                 input=prompt, capture_output=True, text=True,
                 timeout=900, env=env).stdout
         except subprocess.TimeoutExpired:
