@@ -48,8 +48,27 @@ func Read(path string) (*Book, error) {
 		return json.Unmarshal(b, v)
 	}
 
+	manBytes, err := readBytes("manifest.json")
+	if err != nil {
+		return nil, fmt.Errorf("read manifest: %w", err)
+	}
+	// The version check reads formatVersion on its own first: this package is
+	// the version-1 model, and a later format shares field names with
+	// incompatible types, so decoding it whole would fail with a confusing
+	// type error instead of saying which version the file is.
+	var probe struct {
+		FormatVersion int `json:"formatVersion"`
+	}
+	if err := json.Unmarshal(manBytes, &probe); err != nil {
+		return nil, fmt.Errorf("read manifest: %w", err)
+	}
+	if probe.FormatVersion != 1 {
+		return nil, fmt.Errorf("%s is .tbook formatVersion %d, this reader handles version 1 only "+
+			"(version 2 lives in internal/tbook/v2; produce it with --format v2 or tbook-migrate)",
+			path, probe.FormatVersion)
+	}
 	var man Manifest
-	if err := readJSON("manifest.json", &man); err != nil {
+	if err := json.Unmarshal(manBytes, &man); err != nil {
 		return nil, fmt.Errorf("read manifest: %w", err)
 	}
 

@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tbook.dev/schema/tbook-2.schema.json",
+  "title": ".tbook format version 2 — JSON entries",
+  "description": "manifest.json validates against #/$defs/manifest, text/chN.json against #/$defs/textChapter, text/notes.json against #/$defs/textNotes, gloss/chN.<lang>.json against #/$defs/glossChapter and gloss/notes.<lang>.json against #/$defs/glossNotes. Every offset is a Unicode code point into NFC text. Cross-entry rules (binding, ranges, digests) are in the specification, not here.",
+  "$defs": {
+    "offset": { "type": "integer", "minimum": 0 },
+    "range": { "type": "array", "prefixItems": [{ "$ref": "#/$defs/offset" }, { "$ref": "#/$defs/offset" }], "items": false, "minItems": 2 },
+    "langTag": { "type": "string", "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$" },
+    "entryName": { "type": "string", "minLength": 1, "pattern": "^[^/\\\\][^\\\\]*$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "intList": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+    "manifest": {
+      "type": "object",
+      "required": ["formatVersion", "requires", "title", "authors", "languages", "text", "notes", "spine", "schema", "digests"],
+      "properties": {
+        "formatVersion": { "const": 2 },
+        "requires": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "title": { "type": "string" },
+        "authors": { "type": "array", "items": { "type": "string" } },
+        "languages": {
+          "type": "object", "required": ["source", "targets"],
+          "properties": {
+            "source": { "$ref": "#/$defs/langTag" },
+            "targets": { "type": "array", "items": { "$ref": "#/$defs/langTag" }, "uniqueItems": true }
+          }
+        },
+        "text": {
+          "type": "object", "required": ["tokenizer", "offsets", "normalization"],
+          "properties": {
+            "tokenizer": { "const": "tbook-w2" },
+            "offsets": { "const": "codepoint" },
+            "normalization": { "const": "NFC" }
+          }
+        },
+        "cover": { "type": ["string", "null"] },
+        "notes": {
+          "oneOf": [
+            { "type": "object", "maxProperties": 0 },
+            {
+              "type": "object", "required": ["text", "gloss"],
+              "properties": {
+                "text": { "$ref": "#/$defs/entryName" },
+                "gloss": { "type": "object", "additionalProperties": { "$ref": "#/$defs/entryName" } }
+              }
+            }
+          ]
+        },
+        "spine": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/chapterRef" } },
+        "source": { "$ref": "#/$defs/source" },
+        "schema": { "$ref": "#/$defs/entryName" },
+        "digests": { "type": "object", "additionalProperties": { "$ref": "#/$defs/digest" } },
+        "meta": { "type": "object" }
+      }
+    },
+    "chapterRef": {
+      "type": "object", "required": ["id", "title", "text", "gloss"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "level": { "type": "integer", "minimum": 0 },
+        "text": { "$ref": "#/$defs/entryName" },
+        "gloss": { "type": "object", "additionalProperties": { "$ref": "#/$defs/entryName" } },
+        "paragraphs": { "type": "integer", "minimum": 0 },
+        "sentences": { "type": "integer", "minimum": 0 },
+        "words": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string" },
+        "sha256": { "$ref": "#/$defs/hex64" },
+        "identifier": { "type": "string" },
+        "title": { "type": "string" },
+        "language": { "type": "string" },
+        "textSha256": { "$ref": "#/$defs/hex64" },
+        "docs": {
+          "type": "array",
+          "items": {
+            "type": "object", "required": ["href", "chars", "sha256"],
+            "properties": {
+              "href": { "type": "string" },
+              "chars": { "type": "integer", "minimum": 0 },
+              "sha256": { "$ref": "#/$defs/hex64" },
+              "title": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "span": {
+      "type": "object", "required": ["s", "e", "k"],
+      "properties": { "s": { "$ref": "#/$defs/offset" }, "e": { "$ref": "#/$defs/offset" }, "k": { "type": "string" } }
+    },
+    "noteRef": {
+      "type": "object", "required": ["p", "id", "label"],
+      "properties": { "p": { "$ref": "#/$defs/offset" }, "id": { "type": "string" }, "label": { "type": "string" } }
+    },
+    "unit": {
+      "type": "object", "required": ["s", "w"],
+      "properties": {
+        "s": { "type": "integer", "minimum": 0 },
+        "w": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 2 },
+        "k": { "type": "string" }
+      }
+    },
+    "block": {
+      "type": "object", "required": ["text", "sents"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "role": { "type": "string" },
+        "text": { "type": "string" },
+        "sents": { "type": "array", "items": { "$ref": "#/$defs/range" } },
+        "words": { "type": "array", "items": { "type": "array", "items": { "$ref": "#/$defs/range" } } },
+        "spans": { "type": "array", "items": { "$ref": "#/$defs/span" } },
+        "notes": { "type": "array", "items": { "$ref": "#/$defs/noteRef" } },
+        "units": { "type": "array", "items": { "$ref": "#/$defs/unit" } },
+        "figure": {
+          "type": "object", "required": ["image"],
+          "properties": { "image": { "$ref": "#/$defs/entryName" }, "alt": { "type": "string" } }
+        },
+        "table": {
+          "type": "object", "required": ["rows"],
+          "properties": { "rows": { "type": "array", "minItems": 1, "items": { "type": "array", "items": { "$ref": "#/$defs/block" } } } }
+        },
+        "header": { "type": "boolean" }
+      }
+    },
+    "textChapter": {
+      "type": "object", "required": ["id", "paragraphs"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "paragraphs": { "type": "array", "items": { "$ref": "#/$defs/block" } }
+      }
+    },
+    "note": {
+      "type": "object", "required": ["label", "paragraphs"],
+      "properties": {
+        "label": { "type": "string" },
+        "kind": { "type": "string" },
+        "paragraphs": { "type": "array", "items": { "$ref": "#/$defs/block" } }
+      }
+    },
+    "textNotes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/note" } },
+    "link": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 0 },
+        { "type": "array", "items": { "type": "integer", "minimum": 0 }, "uniqueItems": true }
+      ]
+    },
+    "verdict": {
+      "type": "object", "required": ["ok", "by"],
+      "properties": { "ok": { "type": "boolean" }, "by": { "type": "string", "minLength": 1 }, "why": { "type": "string" } }
+    },
+    "group": {
+      "type": "array", "minItems": 3, "items": false,
+      "prefixItems": [{ "type": "string" }, { "$ref": "#/$defs/intList" }, { "$ref": "#/$defs/intList" }]
+    },
+    "part": {
+      "type": "array", "minItems": 4, "items": false,
+      "prefixItems": [{ "type": "integer", "minimum": 0 }, { "$ref": "#/$defs/offset" }, { "$ref": "#/$defs/offset" }, { "$ref": "#/$defs/link" }]
+    },
+    "translation": {
+      "type": "object",
+      "properties": {
+        "t": { "type": "string" },
+        "a": { "type": "array", "items": { "$ref": "#/$defs/link" } },
+        "x": { "type": "array", "items": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 2 } },
+        "words": { "type": "array", "items": { "$ref": "#/$defs/range" } },
+        "s": { "type": "string", "minLength": 1 },
+        "v": { "$ref": "#/$defs/verdict" },
+        "lang": { "$ref": "#/$defs/langTag" },
+        "groups": { "type": "array", "items": { "$ref": "#/$defs/group" } },
+        "parts": { "type": "array", "items": { "$ref": "#/$defs/part" } }
+      }
+    },
+    "sentenceList": { "type": "array", "items": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/translation" }] } },
+    "glossCell": { "type": "object", "required": ["s"], "properties": { "s": { "$ref": "#/$defs/sentenceList" } } },
+    "glossParagraph": {
+      "type": "object",
+      "oneOf": [
+        { "required": ["id", "s"], "properties": { "id": { "type": "string", "minLength": 1 }, "s": { "$ref": "#/$defs/sentenceList" } } },
+        { "required": ["id", "rows"], "properties": { "id": { "type": "string", "minLength": 1 }, "rows": { "type": "array", "items": { "type": "array", "items": { "$ref": "#/$defs/glossCell" } } } } }
+      ]
+    },
+    "glossChapter": {
+      "type": "object", "required": ["lang", "chapter", "gates", "alignDigest", "paragraphs"],
+      "properties": {
+        "lang": { "$ref": "#/$defs/langTag" },
+        "chapter": { "type": "string", "minLength": 1 },
+        "gates": { "type": "array", "items": { "type": "string" } },
+        "alignDigest": { "$ref": "#/$defs/digest" },
+        "paragraphs": { "type": "array", "items": { "$ref": "#/$defs/glossParagraph" } }
+      }
+    },
+    "glossNotes": {
+      "type": "object", "required": ["lang", "gates", "alignDigest", "notes"],
+      "properties": {
+        "lang": { "$ref": "#/$defs/langTag" },
+        "gates": { "type": "array", "items": { "type": "string" } },
+        "alignDigest": { "$ref": "#/$defs/digest" },
+        "notes": { "type": "object", "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/glossParagraph" } } }
+      }
+    }
+  }
+}
