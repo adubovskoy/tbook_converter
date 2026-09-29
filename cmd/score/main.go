@@ -40,6 +40,7 @@ import (
 	"github.com/dimando/reader/converter/internal/segment"
 	"github.com/dimando/reader/converter/internal/stopwords"
 	"github.com/dimando/reader/converter/internal/tbook"
+	"github.com/dimando/reader/converter/internal/tbook/v2/migrate"
 )
 
 func main() {
@@ -71,7 +72,7 @@ func main() {
 }
 
 func run(path, tgt, probePath, dumpPath string, minWords int) error {
-	b, err := tbook.Read(path)
+	b, _, err := migrate.ReadBook(path)
 	if err != nil {
 		return fmt.Errorf("read book: %w", err)
 	}

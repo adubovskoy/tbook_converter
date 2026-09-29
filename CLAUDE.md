@@ -1,7 +1,8 @@
 # CLAUDE.md — converter
 
-Repo-specific guidance. The workspace-wide file is `../CLAUDE.md`; the normative format spec is
-`../doc/specs/tbook-format.md`. Day-to-day usage, flags and tuning live in `README.md`.
+Repo-specific guidance. The workspace-wide file is `../CLAUDE.md`; the normative format specs are
+`../doc/specs/tbook-format-v2.md` (v2, Candidate — the default output) and
+`../doc/specs/tbook-format.md` (v1, frozen, `--format v1`). Day-to-day usage, flags and tuning live in `README.md`.
 
 ## Language: everything written is English
 

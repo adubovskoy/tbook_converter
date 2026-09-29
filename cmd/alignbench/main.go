@@ -5,7 +5,12 @@
 // LaBSE+argmax over the LLM align pass):
 //
 //	alignbench book.tbook -s ru -t es [--script tools/embalign.py]
+//	           [--layer 8] [--method argmax|itermax]
 //	           [--lexicons lexicons] [--limit N]
+//
+// --layer and --method sweep the two aligner knobs the tool used to hold
+// fixed at their defaults; the glue thresholds are read by the child from
+// EMBALIGN_GLUE_MIN / EMBALIGN_TGT_GLUE_MIN in this process's environment.
 //
 // Reported: all-word and content-word coverage (mean + share of sentences a
 // hybrid gate at EmbQMin would send to the LLM pass), and lexcheck evidence
@@ -35,11 +40,26 @@ func main() {
 	src := flag.String("s", "ru", "source language")
 	tgt := flag.String("t", "es", "target language")
 	script := flag.String("script", "tools/embalign.py", "aligner script to benchmark")
+	layer := flag.Int("layer", 0, "encoder hidden layer (0 = the aligner's default)")
+	method := flag.String("method", "", "matching: argmax (precision-first) | itermax (recall-first); empty = the aligner's default")
 	lexDir := flag.String("lexicons", "lexicons", "lexicon directory")
 	limit := flag.Int("limit", 0, "evaluate only the first N sentences (0 = all)")
 	qmin := flag.Float64("qmin", translate.DefaultEmbQMin, "gate threshold to report against")
-	flag.Parse()
-	if flag.NArg() != 1 {
+
+	// Accept the book path before the flags (alignbench book.tbook -t ru) as
+	// well as after them — stdlib flag stops at the first non-flag argument,
+	// which silently turned every flag after the path into a positional.
+	args := os.Args[1:]
+	book := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		book, args = args[0], args[1:]
+	}
+	flag.CommandLine.Parse(args)
+	switch {
+	case book == "" && flag.NArg() == 1:
+		book = flag.Arg(0)
+	case book != "" && flag.NArg() == 0:
+	default:
 		fmt.Fprintln(os.Stderr, "usage: alignbench book.tbook [flags]")
 		os.Exit(2)
 	}
@@ -57,7 +77,7 @@ func main() {
 		fmt.Printf("no %s stopword list: content coverage equals all-word coverage\n", *tgt)
 	}
 
-	sentences, err := readBook(flag.Arg(0), *tgt)
+	sentences, err := readBook(book, *tgt)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "read book:", err)
 		os.Exit(1)
@@ -67,7 +87,7 @@ func main() {
 	}
 	fmt.Printf("%d sentences, script %s\n", len(sentences), *script)
 
-	aligner, err := embalign.Start(embalign.Options{Script: *script})
+	aligner, err := embalign.Start(embalign.Options{Script: *script, Layer: *layer, Method: *method})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

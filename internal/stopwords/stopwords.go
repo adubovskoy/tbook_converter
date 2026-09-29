@@ -12,7 +12,10 @@
 // anything else and callers fall back to counting every word.
 package stopwords
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // lists holds one whitespace-separated lowercase word list per language code.
 var lists = map[string]string{
@@ -214,4 +217,14 @@ var sets = func() map[string]map[string]bool {
 // when no list ships for it — callers then fall back to counting every word.
 func Set(lang string) map[string]bool {
 	return sets[strings.ToLower(strings.TrimSpace(lang))]
+}
+
+// Langs returns the language codes that ship a stopword list, sorted.
+func Langs() []string {
+	out := make([]string, 0, len(sets))
+	for lang := range sets {
+		out = append(out, lang)
+	}
+	sort.Strings(out)
+	return out
 }

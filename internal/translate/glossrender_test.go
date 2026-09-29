@@ -36,9 +36,10 @@ func TestAcceptGlossEntryGates(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := acceptGlossEntry(c.entry, "en", c.target); got != c.want {
-				t.Errorf("acceptGlossEntry(%q → %q, %s) = %v, want %v",
-					c.entry.Src, c.entry.Tgt, c.target, got, c.want)
+			why := rejectGlossEntry(c.entry, "en", c.target)
+			if got := why == ""; got != c.want {
+				t.Errorf("rejectGlossEntry(%q → %q, %s) = %q, want kept=%v",
+					c.entry.Src, c.entry.Tgt, c.target, why, c.want)
 			}
 		})
 	}

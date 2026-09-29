@@ -35,3 +35,7 @@ __pycache__/
 
 # Go build output (GUI binary built straight into the repo root)
 /convert-gui
+
+# Frozen experiment binaries built by benchmark agents
+/bin/
+.playwright-mcp/

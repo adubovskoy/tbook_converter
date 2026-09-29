@@ -22,6 +22,26 @@ multilingual encoder (LaBSE by default, hidden layer 8), cosine similarity
 over subwords, then
   argmax   mutual argmax (high precision, lower recall — production default)
   itermax  iterative argmax, 2 rounds (higher recall)
+  itermax-guarded
+           itermax with a CLOSED-CLASS FREEZE: after the second matching round,
+           a source word that is in the SOURCE language's closed-class list
+           (tools/stopwords.json, exported from internal/stopwords) keeps
+           argmax's pairs and nothing else; every other source word keeps
+           itermax's. The union then goes through the unchanged glue and
+           grouping steps. Source language: --src-lang (default en).
+  itermax-silent
+           itermax restricted to SILENT source words. BOTH pipelines are run in
+           full — argmax and itermax, each through its own unchanged glue steps
+           — and then merged per source word: a word the argmax pipeline lights
+           keeps that highlight EXACTLY (never widened, narrowed or moved), and
+           only a word the argmax pipeline leaves dark takes itermax's. The
+           merge is post-glue on purpose: merging before glue lets the glue
+           steps re-decide around the new pairs and move highlights argmax had
+           already placed.
+  itermax-silent-cc
+           itermax-silent plus the closed-class freeze: a silent source word in
+           the source language's closed-class list stays silent, so only
+           CONTENT words are ever recovered. Source language: --src-lang.
 A word pair is aligned if any of its subword pairs is aligned. Runs on CPU.
 
 Setup: tools/embalign-setup.sh (venv with CPU torch + transformers + numpy).
@@ -101,17 +121,162 @@ def itermax_pairs(sim, rounds=2):
     return pairs
 
 
+# GUARDED is the opt-in closed-class freeze (D4b report §6). It is a distinct
+# METHOD VALUE, not a flag on itermax, so `argmax` and `itermax` stay byte for
+# byte what they were: nothing below this line runs unless the caller asks for
+# it by name.
+GUARDED = "itermax-guarded"
+
+# SILENT / SILENT_CC are D4d's variants (D4c report §8): recall for words that
+# light nothing, and nothing else. Like GUARDED they are distinct METHOD
+# VALUES, so `argmax` and `itermax` stay byte for byte what they were.
+SILENT = "itermax-silent"
+SILENT_CC = "itermax-silent-cc"
+
+# Every method value that needs the source language's closed-class list.
+# SILENT is in the list only so its stderr counter can split content from
+# function words: with freeze_closed off the set changes no pair.
+NEEDS_STOP = (GUARDED, SILENT, SILENT_CC)
+
+# Closed-class lists, exported from internal/stopwords by
+# `go run ./cmd/stopwordsdump -o tools/stopwords.json` (kept honest by
+# TestExportedFileMatches). Loaded lazily: an argmax/itermax run never reads it.
+STOPWORDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "stopwords.json")
+
+_stop_cache = {}
+
+
+def closed_class_set(lang):
+    """Lowercase closed-class words for `lang`, or an empty set when no list
+    ships for it (the guard then degrades to plain itermax, loudly)."""
+    lang = (lang or "").strip().lower()
+    if lang in _stop_cache:
+        return _stop_cache[lang]
+    try:
+        with open(STOPWORDS_FILE, encoding="utf-8") as f:
+            words = json.load(f).get(lang) or []
+    except OSError as e:
+        print(f"closed-class guard: cannot read {STOPWORDS_FILE}: {e}", file=sys.stderr)
+        words = []
+    if not words:
+        print(f"closed-class guard: no list for source language {lang!r} — "
+              f"the guard is a no-op and this run is plain itermax", file=sys.stderr)
+    _stop_cache[lang] = {w.lower() for w in words}
+    return _stop_cache[lang]
+
+
+# Per-branch word counts for the guard, reported to stderr (the caller's log).
+GUARD_STATS = {"closed": 0, "content": 0, "closed_frozen": 0, "content_gained": 0,
+               "sentences": 0}
+
+
+def guard_closed_class(argmax_wp, itermax_wp, words, stop):
+    """Per source word, keep argmax's target set for a closed-class word and
+    itermax's for every other word; return the union as sorted [s, t] pairs.
+
+    `words` are the source word strings in the SAME local index space as the
+    pairs. Well-defined because itermax only ever adds to argmax's pair set, so
+    argmax's set for any source word is always available (possibly empty — a
+    closed-class word argmax left unaligned stays unaligned here, exactly as in
+    an argmax run, and the unchanged glue steps get their usual shot at it)."""
+    a_by_s, i_by_s = {}, {}
+    for s, t in argmax_wp:
+        a_by_s.setdefault(s, set()).add(t)
+    for s, t in itermax_wp:
+        i_by_s.setdefault(s, set()).add(t)
+    out = []
+    for s in sorted(set(a_by_s) | set(i_by_s)):
+        w = words[s] if 0 <= s < len(words) else ""
+        if w.lower() in stop:
+            GUARD_STATS["closed"] += 1
+            keep = a_by_s.get(s, set())
+            if keep != i_by_s.get(s, set()):
+                GUARD_STATS["closed_frozen"] += 1
+        else:
+            GUARD_STATS["content"] += 1
+            keep = i_by_s.get(s, set())
+            if keep != a_by_s.get(s, set()):
+                GUARD_STATS["content_gained"] += 1
+        out.extend([s, t] for t in sorted(keep))
+    GUARD_STATS["sentences"] += 1
+    if GUARD_STATS["sentences"] % 500 == 0:
+        log_guard_stats("progress")
+    return sorted(out)
+
+
+SILENT_STATS = {"kept": 0, "lit_content": 0, "lit_closed": 0, "frozen_closed": 0,
+                "sentences": 0}
+
+
+def silent_only(argmax_wp, itermax_wp, words, stop, freeze_closed):
+    """Keep the argmax pipeline's target set for every source word it lights,
+    and the itermax pipeline's only for source words it leaves dark.
+
+    Both inputs are FINAL pair lists — each already through glue_idioms and
+    glue_target — so nothing a word already lights can change: no widening, no
+    narrowing, no move. The only difference against an argmax run is that some
+    previously silent source word now lights something. With `freeze_closed`, a
+    silent word in the source language's closed-class list stays silent too, so
+    only CONTENT words are ever recovered."""
+    a_by_s, i_by_s = {}, {}
+    for s, t in argmax_wp:
+        a_by_s.setdefault(s, set()).add(t)
+    for s, t in itermax_wp:
+        i_by_s.setdefault(s, set()).add(t)
+    out = []
+    for s in sorted(set(a_by_s) | set(i_by_s)):
+        if s in a_by_s:
+            SILENT_STATS["kept"] += 1
+            keep = a_by_s[s]
+        else:
+            w = words[s] if 0 <= s < len(words) else ""
+            closed = w.lower() in stop
+            if closed and freeze_closed:
+                SILENT_STATS["frozen_closed"] += 1
+                continue
+            SILENT_STATS["lit_closed" if closed else "lit_content"] += 1
+            keep = i_by_s[s]
+        out.extend([s, t] for t in sorted(keep))
+    SILENT_STATS["sentences"] += 1
+    if SILENT_STATS["sentences"] % 500 == 0:
+        log_silent_stats("progress")
+    return sorted(out)
+
+
+def log_silent_stats(tag):
+    g = SILENT_STATS
+    print(f"silent-only recall ({tag}): {g['sentences']} sentences, "
+          f"{g['kept']} source words kept exactly as argmax aligned them; of the words "
+          f"argmax left unaligned, a round-two pair was taken for "
+          f"{g['lit_content']} CONTENT and {g['lit_closed']} closed-class words, and "
+          f"{g['frozen_closed']} closed-class words were left dark by the freeze "
+          f"(counts are post-glue: both pipelines run in full before the merge)",
+          file=sys.stderr)
+
+
+def log_guard_stats(tag):
+    g = GUARD_STATS
+    print(f"closed-class guard ({tag}): {g['sentences']} sentences, "
+          f"{g['closed']} closed-class source words frozen to argmax "
+          f"({g['closed_frozen']} of them differed from itermax), "
+          f"{g['content']} content source words taken from itermax "
+          f"({g['content_gained']} of them differed from argmax)",
+          file=sys.stderr)
+
+
 def to_word_pairs(sub_pairs, src_wids, tgt_wids):
     """Subword pairs -> sorted unique (srcWord, tgtWord) pairs."""
     return sorted({(src_wids[i], tgt_wids[j]) for i, j in sub_pairs})
 
 
-def align_pair(model, tokenizer, src_words, tgt_words, layer, method, units=None):
+def align_pair(model, tokenizer, src_words, tgt_words, layer, method, units=None,
+               stop=None):
     """Word alignment for one pre-split sentence pair -> sorted [s, t] pairs.
     Empty/blank words are excluded from the model input but original indices
     are preserved in the output pairs."""
     return align_batch(model, tokenizer, [(src_words, tgt_words)], layer, method,
-                       [units])[0]
+                       [units], stop)[0]
 
 
 # GLUE_MIN gates the idiom-glue step (0 disables): an uncovered source word is
@@ -254,15 +419,39 @@ def glue_target(word_pairs, sim, s_wids, t_wids):
     return sorted(word_pairs + added)
 
 
-def match_pairs(sv, s_wids, tv, t_wids, s_map, t_map, method, units=None):
+def glued(sub_pairs, sim, s_wids, t_wids):
+    """One matcher's subword pairs -> that arm's FINAL local word pairs: the
+    same word conversion and the same two glue steps a normal run applies."""
+    local = [[s, t] for s, t in to_word_pairs(sub_pairs, s_wids, t_wids)]
+    local = glue_idioms(local, sim, s_wids, t_wids)
+    return glue_target(local, sim, s_wids, t_wids)
+
+
+def match_pairs(sv, s_wids, tv, t_wids, s_map, t_map, method, units=None,
+                src_words=None, stop=None):
     """Similarity + argmax matching for one encoded pair -> [s, t] word pairs.
     `units` (optional) drives the experimental unit-glue step, which runs last
-    and in request-index space (see glue_units)."""
+    and in request-index space (see glue_units). `src_words`/`stop` are read
+    only by the GUARDED method (source word strings in local index space, and
+    the source language's closed-class set)."""
     sim = sv @ tv.T
-    sub = itermax_pairs(sim) if method == "itermax" else argmax_pairs(sim)
-    local = [[s, t] for s, t in to_word_pairs(sub, s_wids, t_wids)]
-    local = glue_idioms(local, sim, s_wids, t_wids)
-    local = glue_target(local, sim, s_wids, t_wids)
+    if method in (SILENT, SILENT_CC):
+        # Both pipelines in full, then merge — see silent_only.
+        local = silent_only(
+            glued(argmax_pairs(sim), sim, s_wids, t_wids),
+            glued(itermax_pairs(sim), sim, s_wids, t_wids),
+            src_words or [], stop or set(), method == SILENT_CC)
+    else:
+        if method == GUARDED:
+            local = guard_closed_class(
+                to_word_pairs(argmax_pairs(sim), s_wids, t_wids),
+                to_word_pairs(itermax_pairs(sim), s_wids, t_wids),
+                src_words or [], stop or set())
+        else:
+            sub = itermax_pairs(sim) if method == "itermax" else argmax_pairs(sim)
+            local = [[s, t] for s, t in to_word_pairs(sub, s_wids, t_wids)]
+        local = glue_idioms(local, sim, s_wids, t_wids)
+        local = glue_target(local, sim, s_wids, t_wids)
     pairs = [[s_map[s], t_map[t]] for s, t in local]
     return glue_units(pairs, units)
 
@@ -282,7 +471,7 @@ def encode_sorted(model, tokenizer, word_lists, layer, sub_batch=32):
     return results
 
 
-def align_batch(model, tokenizer, items, layer, method, units_list=None):
+def align_batch(model, tokenizer, items, layer, method, units_list=None, stop=None):
     """Word alignment for many pre-split (src_words, tgt_words) pairs. Sources
     are encoded in length-sorted padded sub-batches, targets likewise — the
     matching per pair is identical to align_pair (padding subwords are excluded
@@ -305,9 +494,11 @@ def align_batch(model, tokenizer, items, layer, method, units_list=None):
             out.append([])
             continue
         (sv, s_wids), (tv, t_wids) = src_vecs[k], tgt_vecs[k]
+        local_src = src_in[k]
         k += 1
         units = units_list[i] if units_list else None
-        out.append(match_pairs(sv, s_wids, tv, t_wids, s_map, t_map, method, units))
+        out.append(match_pairs(sv, s_wids, tv, t_wids, s_map, t_map, method, units,
+                               local_src, stop))
     return out
 
 
@@ -316,7 +507,12 @@ def main():
     ap.add_argument("--serve", action="store_true", help="JSONL request/response server on stdin/stdout")
     ap.add_argument("--model", default="sentence-transformers/LaBSE")
     ap.add_argument("--layer", type=int, default=8)
-    ap.add_argument("--methods", default="argmax", help="argmax | itermax (first entry is used)")
+    ap.add_argument("--methods", default="argmax",
+                    help="argmax | itermax | itermax-guarded | itermax-silent | "
+                         "itermax-silent-cc (first entry is used)")
+    ap.add_argument("--src-lang", default=os.environ.get("EMBALIGN_SRC_LANG", "") or "en",
+                    help="source language code; read only by the closed-class methods "
+                         "(itermax-guarded, itermax-silent-cc) (default: en)")
     ap.add_argument("--threads", type=int,
                     default=int(os.environ.get("EMBALIGN_THREADS", "0")) or max(1, (os.cpu_count() or 2) // 2),
                     help="torch intra-op threads (default: physical cores, i.e. logical/2 — measured "
@@ -325,6 +521,19 @@ def main():
     if not args.serve:
         ap.error("--serve is the only mode")
     method = [m.strip() for m in args.methods.split(",") if m.strip()][0]
+    stop = None
+    if method in NEEDS_STOP:
+        stop = closed_class_set(args.src_lang)
+    if method == GUARDED:
+        print(f"closed-class guard ON: itermax, with {len(stop)} {args.src_lang} "
+              f"closed-class source words frozen to argmax", file=sys.stderr)
+    elif method == SILENT:
+        print("silent-only recall ON: itermax pairs kept only for source words "
+              "argmax left unaligned", file=sys.stderr)
+    elif method == SILENT_CC:
+        print(f"silent-only recall ON with closed-class freeze: itermax pairs kept only "
+              f"for CONTENT source words argmax left unaligned ({len(stop)} "
+              f"{args.src_lang} closed-class words stay dark)", file=sys.stderr)
 
     print(f"loading {args.model} ...", file=sys.stderr)
     torch.set_num_threads(max(1, args.threads))
@@ -363,15 +572,20 @@ def main():
                     [(it["src"], it["tgt"]) for it in req["batch"]],
                     args.layer, method,
                     [it.get("units") for it in req["batch"]],
+                    stop,
                 )
                 results = [{"pairs": p} for p in pairs_list]
                 print(json.dumps({"results": results}), flush=True)
             else:
                 pairs = align_pair(model, tokenizer, req["src"], req["tgt"], args.layer, method,
-                                   req.get("units"))
+                                   req.get("units"), stop)
                 print(json.dumps({"pairs": pairs}), flush=True)
         except Exception as e:  # keep serving; the caller decides what to do
             print(json.dumps({"error": f"{type(e).__name__}: {e}"}), flush=True)
+    if method == GUARDED:
+        log_guard_stats("total")
+    elif method in (SILENT, SILENT_CC):
+        log_silent_stats("total")
 
 
 if __name__ == "__main__":

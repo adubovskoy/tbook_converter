@@ -55,6 +55,8 @@ func repairPipeline(t *testing.T, srv *httptest.Server, cacheDir, model string, 
 	t.Helper()
 	client := NewClient(Options{BaseURL: srv.URL, APIKey: "x", Model: model,
 		Temperature: 0, MaxRetries: 2, Timeout: 5 * time.Second})
+	// Target German, not Russian: the fixtures answer in ASCII, and the
+	// target-script guard is right to refuse Latin text as a Russian translation.
 	return &Pipeline{Client: client, CacheDir: cacheDir, Source: "en",
 		BatchSize: 16, Concurrency: 1, Repair: true, RepairContext: ctxN}
 }
@@ -78,7 +80,7 @@ func TestRepairContextSendsNeighbours(t *testing.T) {
 	defer srv.Close()
 
 	pipe := repairPipeline(t, srv, t.TempDir(), "test-model", 2)
-	if err := pipe.Run(context.Background(), repairSentences(), []string{"ru"}); err != nil {
+	if err := pipe.Run(context.Background(), repairSentences(), []string{"de"}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if len(seen) != 4 {
@@ -120,7 +122,7 @@ func TestRepairContextIsOffByDefault(t *testing.T) {
 	defer srv.Close()
 
 	pipe := repairPipeline(t, srv, t.TempDir(), "test-model", 0)
-	if err := pipe.Run(context.Background(), repairSentences(), []string{"ru"}); err != nil {
+	if err := pipe.Run(context.Background(), repairSentences(), []string{"de"}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	for _, it := range seen {
@@ -143,14 +145,14 @@ func TestRepairContextCacheNamespace(t *testing.T) {
 	sentences := repairSentences()
 
 	blind := repairPipeline(t, srv, cacheDir, model, 0)
-	if err := blind.Run(context.Background(), sentences, []string{"ru"}); err != nil {
+	if err := blind.Run(context.Background(), sentences, []string{"de"}); err != nil {
 		t.Fatalf("blind run: %v", err)
 	}
 	translated := len(seen)
 
 	seen = nil
 	ctx2 := repairPipeline(t, srv, cacheDir, model, 2)
-	if err := ctx2.Run(context.Background(), sentences, []string{"ru"}); err != nil {
+	if err := ctx2.Run(context.Background(), sentences, []string{"de"}); err != nil {
 		t.Fatalf("context run: %v", err)
 	}
 	if len(seen) != translated {
@@ -168,7 +170,7 @@ func TestRepairContextCacheNamespace(t *testing.T) {
 		{RepairTextCacheModel(model, 0), "RP:TR:One."},
 		{RepairTextCacheModel(model, 2), "RP:TR:One."},
 	} {
-		tr, ok := cache.Read(cacheDir, cache.RepairKey("One.", "en", "ru", c.model))
+		tr, ok := cache.Read(cacheDir, cache.RepairKey("One.", "en", "de", c.model))
 		if !ok || tr.Text != c.want {
 			t.Errorf("namespace %q: got %q (ok=%v), want %q", c.model, tr.Text, ok, c.want)
 		}

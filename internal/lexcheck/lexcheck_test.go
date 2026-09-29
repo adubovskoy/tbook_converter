@@ -114,3 +114,18 @@ func TestSparseEvidenceNotFlagged(t *testing.T) {
 		t.Fatalf("sparse sentence flagged on thin evidence: %+v", r)
 	}
 }
+
+func TestScoredCountsEveryScoreablePair(t *testing.T) {
+	// Four chunks; "фубар" is scoreable but uncovered, "ты" is too short to
+	// score at all — so Scored counts 3 and Covered 2.
+	s := sentence("la capa profunda xyzzy tu",
+		"слой глубокая фубар ты",
+		[][2]any{{"слой", 1}, {"глубокая", 2}, {"фубар", 3}, {"ты", 4}})
+	r := dict().CheckSentence(s, "ru")
+	if r.Scored != 3 {
+		t.Fatalf("Scored = %d, want 3 (%+v)", r.Scored, r)
+	}
+	if r.Covered != 2 {
+		t.Fatalf("Covered = %d, want 2 (%+v)", r.Covered, r)
+	}
+}

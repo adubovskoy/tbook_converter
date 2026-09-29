@@ -19,7 +19,7 @@ tools/fetch-lexicons.sh en-ru   # dictionary for the free drift check
 # Convert (English → Russian by default)
 ./convert book.epub -o book.tbook
 
-# Other languages; add a language to an existing .tbook; preview only
+# Other languages; add (or replace) a language in an existing .tbook; preview only
 ./convert book.epub -s de -t ru -o book.tbook
 ./convert book.tbook -t en
 ./convert book.epub --dry-run
@@ -62,10 +62,30 @@ Near-free alternative: `./convert book.epub --provider gonka` sends batches to
 the [Gonka](https://gonka.ai) decentralized compute network via the
 [proxy.gonka.gg](https://proxy.gonka.gg) gateway (OpenAI-compatible; set
 `GONKA_API_KEY`). Pricing is ~$0.0001 per 1M tokens — a whole book costs a
-fraction of a cent. Default model `moonshotai/Kimi-K2.6` (reasoning is switched
-off automatically); `MiniMaxAI/MiniMax-M2.7` is also served but always reasons,
-paying reasoning latency on every batch (its inline `<think>` output is
-stripped at parse time).
+fraction of a cent.
+
+**Which models the gateway serves changes, on the scale of hours**, and
+`/v1/models` is not authoritative in either direction — only `/chat/completions`
+is. A `404 model_not_found` prints the served list from the gateway's own reply
+and stops the run rather than retrying. As of **2026-09-19**
+(`bench-quality/reports/gonka-models-2026-09-19.md`):
+
+| model | state |
+|---|---|
+| `deepseek-ai/DeepSeek-V4-Flash-0731` | **the default.** Does not reason at all, so its batches fit the gateway's 120 s router deadline: 91.7–100 % request success in every probe cell, p50 3.6–8.7 s per batch of 8. It also returned a whole batch in fluent Chinese, twice — hence the guard below. |
+| `MiniMaxAI/MiniMax-M2.7` | the fallback. Always reasons (~3–4× slower); use `--batch-size 4`. |
+| `zai-org/GLM-5.3-Flash` | unservable: unbounded reasoning misses the deadline even at one sentence per request. |
+| `moonshotai/Kimi-K2.6` | the previous default, and the model every gonka quality number in these reports describes — `404` at every probe since 2026-09-17. |
+
+Gonka defaults, all from that probe and all overridable by flag or env: batch 8,
+concurrency 8 (the gateway's concurrency budget is **shared** across its
+clients, so 32 buys nothing and only raises the 429 risk), 3 retries,
+`REQUEST_TIMEOUT_SEC` 60 (the edge router cuts at ~120 s regardless, so past
+60 s a request is parked rather than slow — this alone was the difference
+between 0.73 and 5.72 sent/s end to end), and the proofread pass on.
+
+Reasoning is switched off automatically where a model honours it; a model that
+reasons anyway has its inline `<think>` output stripped at parse time.
 
 If you can't/won't use an API key: `./convert book.epub --provider claude`
 runs every batch on your logged-in `claude` CLI subscription (default model
@@ -102,6 +122,9 @@ Core: `-o/--out`, `-t/--target` (comma list), `-s/--source` (default `en`),
 `.tbook_cache`), `--limit-chapters N`, `--dry-run`, `--force` (ignore cache),
 `--stats file.jsonl` (per-request latency/provider/tokens/cost log), `-v`.
 
+`--format v2|v1` (env `FORMAT`) — the `.tbook` format version to write. Default
+`v2`; `--format v1` writes the version-1 layout. See [Format version 2](#format-version-2).
+
 `--repair` / `--no-repair` — the proofread pass (see below). **On by default for
 `--provider gonka`, off everywhere else**; either flag (or `REPAIR` / `NO_REPAIR`)
 overrides that.
@@ -111,6 +134,16 @@ sentences with their translations, so it can *fix* a wrong gender or pronoun
 referent instead of being forbidden to touch it. **Use `0` (default) or `2`** —
 `1` is rejected, it measures worse than no context at all. See
 [Getting the best quality](#getting-the-best-quality).
+
+`--typography` (env `TYPOGRAPHY`) — **on by default** for every provider
+(`--typography=false` turns it off). At assembly, normalise the
+punctuation of `ru`/`de`/`fr` translations: target-language quotation marks, dashes,
+`.»`/`, »` placement, French narrow no-break spaces, and quote marks that mirror the
+source sentence (a cell opens/closes a quotation iff its source does). Letters and
+digits never change; alignment offsets are remapped; gate verdicts carry over to
+the rewritten cells. On changed cells the pass won 1,086 : 0 decisive blind pairs
+across two books, two models and three languages. Measured in
+`bench-quality/reports/typography-2026-09-22.md`.
 
 Machine integration (for scripts and services driving the converter):
 
@@ -158,6 +191,22 @@ Machine integration (for scripts and services driving the converter):
   wrong language — measured: an en→ru glossary enforced on six Latin targets put
   Russian into 50–73% of their sentences
   ([report](bench-quality/reports/four-model-bench-2026-08.md) §8).
+
+  **Two entry gates run on every glossary**, whether the model built it or a
+  sidecar supplied it (a loaded file used to be enforced verbatim, so nothing
+  ever examined a hand-edited or carried-over entry):
+
+  - *script* — an entry whose rendering is written in a script the target does
+    not use is **dropped**, with the reason printed. That covers `JacSol →
+    JacSol` for `ru` and `Irene Adler → Айрин Адлер` for `de`, which is the
+    entry class that teaches the leak above.
+  - *lexicon* — a one-word rendering the bilingual lexicon does not know, while
+    it does know a spelling a letter or two away, is **marked**, never changed:
+    the entry keeps being enforced (a dictionary does not get to overrule a
+    book's own terminology) but it loses the proofread pass's "never change
+    these" protection, so that pass may fix it. This is the `escritoire →
+    эскртуар` class, whose 9 occurrences the protection used to preserve
+    verbatim. Marked entries appear in the sidecar's own `suspect` list.
 - `--progress-file file.ndjson` (env `PROGRESS_FILE`) — during a real
   conversion, append NDJSON progress events (one JSON per line, flushed per
   write, throttled to ≤ ~2 lines/sec per phase, final line of a phase always
@@ -182,12 +231,73 @@ Content: `--keep-matter`, `--skip-files pat1,pat2`, `--no-images`, `--no-notes`,
 Quality: `--no-glossary`, `--no-glossary-gender` (drop the `[male]`/`[female]`
 tags), `--only-glossary` (build/edit the glossary, see
 above, then exit; `--force` rebuilds it), `--repair`/`--context N` (proofread
-pass, above), `--no-lexcheck`, `--judge` (semantic verification
+pass, above), `--no-lexcheck`, `--langcheck-gate=false` (leave the
+wrong-language check a report instead of a gate), `--judge` (semantic verification
 report, see below), `--judge-scope` (`flagged` default: suspects + a 5%
 calibration sample — seconds per book | `all`), `--judge-model`,
 `--judge-invalidate`, `--escalate-model` (redo flagged sentences with a
 stronger model — see the warning below), `--invalidate file.json` (clear cached
 translations for listed sentences, then exit).
+
+## Format version 2
+
+The version-2 format (`doc/specs/tbook-format-v2.md`, status Candidate since
+2026-09-26) splits each chapter into a language-free skeleton and one overlay per
+language, links every target token to its source words, and carries the gate
+results the pipeline already has. Version 2 is the default output; pass
+`--format v1` for readers that open version 1 only.
+
+Adding a language to an existing `.tbook` (`./convert book.tbook -t en`) works
+on both versions. A version-2 input is **appended to** as spec §2.4 defines:
+the skeletons and every existing overlay keep their bytes and digests, only the
+new `gloss/*.<lang>.json` overlays (and the footnote overlay) are added, and the
+manifest is rewritten with the language, the new digests and one more
+`meta.runs[]` record listing only that language. The book stays version 2, so
+`--format v1` with a version-2 input is refused. A version-1 input is
+rewritten whole in the requested format, as before. Only the new language is
+translated; `-o` defaults to the input, updated in place.
+
+A language the book **already has** is **replaced** (spec §2.5):
+`./convert book.tbook -t ru` on a book with Russian re-translates it through
+the normal pipeline and cache (use `--force` or another `--model` to get new text
+rather than the cached one) and rewrites the archive. Every other entry —
+`mimetype`, schema, cover, images, skeletons, every other language's overlays —
+is copied byte for byte in its original order, the new `gloss/X.ru.json`
+overlays take the old ones' places, and the manifest (still last) gets the new
+digests and one more run record; earlier runs stay. With `--limit-chapters`
+the replacement is partial: the chapters it does not cover keep their existing
+overlay for that language, byte for byte with its digest unchanged.
+The ZIP archive comment is not kept. An input whose `manifest.json` is not the
+last entry, or is listed twice, is refused for both append and replacement,
+with the entry that follows the manifest named.
+
+```bash
+# Version 2 is the default; --format v1 writes the old layout
+./convert book.epub -t ru -o book.tbook
+./convert book.epub -t ru --format v1 -o book-v1.tbook
+
+# Or convert an existing version-1 file
+go build -o tbook-migrate ./cmd/tbook-migrate && ./tbook-migrate v1.tbook v2.tbook
+go build -o tbook-validate ./cmd/tbook-validate && ./tbook-validate v2.tbook
+```
+
+Migration is lossless for taps except where version 1 cut a word in half: on the
+8-language reference sample 836,496 of 836,600 taps highlight exactly what they
+did before, and all 104 differences sit in the five paragraphs the segmenter
+split mid-word (the format repairs those pages instead). A single-language book
+migrates at 158,421 of 158,421. Files shrink to about half: 6,963,017 to
+3,554,093 bytes for the sample, 2,188,722 to 1,299,559 for a one-language book.
+
+`--format v2` fills what a migration cannot know. Per translation it writes a
+status (`raw` when no alignment shipped, `wrongLang` with the detected language
+from langcheck, `rejected` or `unverified` from escalation outcomes, `skipped`
+for deliberately untranslated citations) and a verdict from langcheck, lexcheck
+or the judge. Each overlay lists the gates that covered *every* one of its
+cells, so a missing verdict means "checked and passed" rather than "never
+looked at" — a judge run over a risk-scoped sample claims `x-judge-scoped`, not
+`judge`. The manifest records the input document's identity (kind, SHA-256,
+identifier, title, language) so a gloss can be tied to the edition it was made
+from.
 
 ## Getting the best quality
 
@@ -279,7 +389,7 @@ for it on a long book.
   changed 49% of the book's sentences scored a statistical dead heat (50.7% vs
   49.3%, p=0.93) and aligned slightly worse.
 - **`MiniMaxAI/MiniMax-M2.7` on gonka** — always reasons; ~2.4 h/book projected,
-  truncated batches, sentences lost. Stay on `moonshotai/Kimi-K2.6`.
+  truncated batches, sentences lost. Keep it as the fallback only, at batch 4.
 - **Bigger `--batch-size`** — generation is output-bound, so bigger is *slower*,
   and on gonka a batch over 8 overflows the 16k-token output cap on verbose
   targets.
@@ -288,7 +398,8 @@ for it on a long book.
 
 ## Quality & verification
 
-Validation proves the file is *well-formed*; two gates check it is *correct*:
+Validation proves the file is *well-formed*; three checks look at whether it is
+*correct*, and only one of them stops a bad cell by itself:
 
 - **Lexcheck** (free, offline, on by default): a bilingual dictionary scores
   every alignment pair and flags sentences on aggregate evidence — low support
@@ -301,17 +412,42 @@ Validation proves the file is *well-formed*; two gates check it is *correct*:
   judge over-flags the embedding aligner's per-word style (measured 53–57%
   false flags on correct de→ru alignments — see the speed report, issue #2).
 
-- **Language check** (free, offline, always on): flags translations that are not
-  in the target language at all — words in a script neither language uses (a
-  batch answered in Chinese; a Russian glossary enforced on a German target),
-  the source copied through untranslated, and one answer served for two targets
-  (`ru`/`uk`, `es`/`pt` — same script, so nothing else sees it). Flags go to
-  `<out>.langflagged.json` (per language, ready for `--invalidate`) with the
-  per-sentence evidence beside it in `<out>.langflagged.detail.json`. This is
-  the only gate that sees a wrong-language answer: validation checks structure,
-  the alignment `q` scores how well the words line up with whatever text
-  arrived, and lexcheck needs dictionary lookups, so text it cannot look up
-  produces no evidence at all.
+- **Language check** (free, offline, always on, and a **gate** since it is the
+  only thing that sees this defect): flags translations that are not in the
+  target language at all — words in a script neither language uses (a batch
+  answered in Chinese; a Russian glossary enforced on a German target), the
+  source copied through untranslated, and one answer served for two targets
+  (`ru`/`uk`, `es`/`pt` — same script, so nothing else sees it). Validation
+  checks structure, the alignment `q` scores how well the words line up with
+  whatever text arrived, and lexcheck needs dictionary lookups, so text it
+  cannot look up produces no evidence at all — 16 fluent Chinese sentences once
+  shipped at `q = 1.000` in a file that validated.
+
+  It works at two levels:
+
+  1. **Per batch, during translation.** After a translate or proofread reply
+     parses, every returned sentence is checked against the target's script. One
+     wrong-language sentence fails the whole batch: it is re-sent with one added
+     line naming the target language (which also changes the request body, so
+     the gateway cannot answer it from cache). When the retry budget is spent
+     the offending sentences are **not written to the cache** — the run leaves
+     them untranslated rather than freezing another language into the book.
+  2. **Over the finished text, before anything else consumes it** — before
+     lexcheck, the align gate and the judge scope. Flagged cells are
+     re-translated with the glossary entries whose renderings are in a foreign
+     script held back from the prompt, twice; what still fails ships
+     untranslated in version 1 and keeps its text with `s: "wrongLang"` in
+     version 2 (spec §6.7), with the count printed. `--langcheck-gate=false`
+     restores the old report-only behaviour.
+
+  Order matters: on a contaminated book lexcheck's flag list *is* the
+  contamination — 1 011 of 1 017 German flags in one book were wrong-language
+  cells, every one reported as `low-support`, i.e. as suspected positional
+  drift, whose remedy cannot fix a sentence that is in the wrong language.
+
+  The reports are written either way: `<out>.langflagged.json` (per language,
+  ready for `--invalidate`) with the per-sentence evidence beside it in
+  `<out>.langflagged.detail.json`.
 
 To redo sentences a report (or your own reading) flagged:
 
@@ -331,17 +467,42 @@ the languages it names).
 LLM-re-aligns every suspicious sentence inside the pipeline; the post-run
 lexcheck flags that remain are almost entirely dictionary-coverage artifacts
 (foreign quotes, macaronic passages) with correct alignments. Escalating them
-burns tokens and can degrade good sentences to no-highlight fallback — and
-never use a reasoning-tier model (`*-pro`) as the escalator (p95 90 s/request).
+burns tokens for little gain — and never use a reasoning-tier model (`*-pro`)
+as the escalator (p95 90 s/request).
+
+**What escalation ships.** Flagged sentences are re-translated and re-aligned
+by `--escalate-model`, re-checked by the same gates (lexcheck + judge), and
+anything still flagged gets one more attempt. Escalated text the LLM aligner
+leaves unaligned is aligned by the local embedding aligner (started on demand
+if the run had none). Escalation never costs a cell its translation or its
+highlights: when it fails — a request error, an empty or wrong-language reply,
+text that cannot be aligned, or output still flagged after the second attempt —
+the cell keeps its original translation and alignment, is listed in
+`<out>.unverified.json`, and in version 2 ships as `unverified` with the
+original's failing verdict. Only a cell that had no original translation keeps
+the escalated text as it is.
+
+**Learner-visible metrics** (free, offline, no API): `cmd/tapledger` classifies
+every (source word, language) tap of a finished `.tbook` into the six classes a
+reader actually gets — `clean` / `clean-multi` / `shared` / `smear` / `none` /
+`dead-sentence` — and reports the content-word silent share; `cmd/consensus`
+takes a book with ≥ 3 targets and reports, per source-word slot, which languages
+highlight it, giving unanimous %, solo misses per language (the per-language
+aligner regression signal) and unanimous misses. Both read format version 1 and
+2, score a version-2 file through the version-2 tap algorithm, and take
+`--content-only` and `--json`. Neither sees a fluent mistranslation — they score
+the mapping, not the meaning. Usage, per-class definitions and the reference
+numbers they are held to: `bench-quality/README.md`.
 
 ## How it works (short version)
 
 Translation and alignment are **two decoupled passes** — a single combined
 pass collapses into positional drift at batch scale. Pass 1 translates
 (`{id,src}` → text). Pass 2 aligns the finished translation: locally via
-SimAlign-style LaBSE embeddings (mutual argmax — structurally immune to
-positional drift, and it *beats* the LLM align pass on lexcheck for en→ru and
-de→ru), with the LLM numbered-echo contract (`"index:text"`) as fallback for
+SimAlign-style LaBSE embeddings (mutual argmax plus silent-word recall for the
+content words argmax leaves dark, `EMBALIGN_METHOD=itermax-silent-cc` —
+structurally immune to positional drift, and it *beats* the LLM align pass on
+lexcheck for en→ru and de→ru), with the LLM numbered-echo contract (`"index:text"`) as fallback for
 gated sentences. The raw pass-1 text is canonical: alignment can place
 highlights but can never rewrite the text. Everything is cached per sentence
 (`promptVersion|model|source|target|src`), so runs resume and contract bumps
@@ -383,7 +544,9 @@ converter version and commit, the provider, the model of each pass
 (translate / align / repair / judge / escalate / embed), each pass's prompt-contract
 version, and the run's settings — so months later you can tell what produced a
 book. Reading a `.tbook` back (adding a language) appends a record instead of
-replacing the history; a re-run with unchanged settings only moves `updatedAt`.
+replacing the history; a version-1 re-run with unchanged settings only moves
+`updatedAt`, while a version-2 append or replacement always adds its record
+(spec §3.10; at most 20 are kept).
 
 No credentials, hosts, or paths go in there — the spec forbids it and a `.tbook`
 gets shared. Inspect it with:
@@ -447,5 +610,11 @@ internal/segment   sentence segmentation + word tokenization (rune offsets)
 internal/align     model chunks → highlight spans located in the raw translation
 internal/cache     resumable on-disk translation cache (sha256-keyed)
 internal/translate LLM clients (OpenRouter HTTP, claude CLI), prompts, batching/retry
-internal/tbook     data model, ZIP assembly, validation
+internal/tbook     data model, ZIP assembly, validation (format version 1)
+internal/tbook/v2  format version 2: types, tokenizer, ids, digests, writer, validator
+internal/tbook/v2/migrate  version 1 -> version 2 conversion (spec Annex A), the reverse
+                   (v2 -> v1-shaped model, ReadBook for either version) and the
+                   overlays of an appended language (spec §2.4)
+cmd/tbook-migrate  convert an existing .tbook from version 1 to version 2
+cmd/tbook-validate check a version-2 .tbook against the spec
 ```

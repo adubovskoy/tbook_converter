@@ -61,6 +61,22 @@ type Options struct {
 	// (latency, status, tokens, cost, serving provider). Also switches on
 	// OpenRouter usage accounting in responses.
 	Stats *Stats
+
+	// UserTag fills the OpenAI-standard "user" field. The gonka gateway caches
+	// identical request bodies — a repeated batch comes back byte-identical in
+	// ~0.2 s — so a benchmark that sends one sentence set twice must vary
+	// something outside the prompt. This does, without touching sampling.
+	// Empty (production) omits the field.
+	UserTag string
+
+	// NoThinking omits gonka's "thinking":{"type":"disabled"} switch, to
+	// measure what reasoning costs. Benchmarks only.
+	NoThinking bool
+
+	// OnContent, when set, receives each raw reply before parsing, so a probe
+	// can see a <think> block that stripThink would remove. Called from every
+	// request goroutine: it must be safe for concurrent use.
+	OnContent func(content string)
 }
 
 // Client calls an OpenAI-style chat-completions API (OpenRouter, or a local
@@ -99,6 +115,7 @@ type chatRequest struct {
 	Usage          *usageOpt       `json:"usage,omitempty"`     // OpenRouter usage accounting (cost per request)
 	Thinking       *thinkingOpt    `json:"thinking,omitempty"`  // Gonka: reasoning off for models that honor it
 	Reasoning      *reasoningOpt   `json:"reasoning,omitempty"` // OpenRouter: unified reasoning switch
+	User           string          `json:"user,omitempty"`      // cache-busting tag for benchmarks (Options.UserTag)
 }
 
 // reasoningOpt is OpenRouter's unified reasoning control. {"enabled":false}
@@ -214,6 +231,9 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 	// adapt gets one chance to rewrite the request after an otherwise
 	// permanent failure, and reports whether it did. nil = nothing to adapt.
 	var adapt func(error) bool
+	// revary rewrites the request body before a retry so a cached malformed
+	// reply cannot be served again. nil for the claude CLI, which has no body.
+	var revary func(attempt int)
 	if c.opts.Provider == ProviderClaude {
 		send = func(ctx context.Context, rec *statRec) (string, time.Duration, error) {
 			rec.Provider = "claude-cli"
@@ -224,6 +244,7 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 			Model:       c.opts.Model,
 			Messages:    []message{{Role: "system", Content: system}, {Role: "user", Content: userJSON}},
 			Temperature: c.opts.Temperature,
+			User:        c.opts.UserTag,
 		}
 		if c.opts.JSONMode {
 			req.ResponseFormat = &responseFormat{Type: "json_object"}
@@ -248,7 +269,7 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 		}
 		// Gonka serves reasoning models; a translation batch never wants the
 		// reasoning (it inflates output tokens and latency, not quality).
-		if c.opts.Provider == ProviderGonka {
+		if c.opts.Provider == ProviderGonka && !c.opts.NoThinking {
 			req.Thinking = &thinkingOpt{Type: "disabled"}
 		}
 		payload, err := json.Marshal(req)
@@ -258,6 +279,20 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 		send = func(ctx context.Context, rec *statRec) (string, time.Duration, error) {
 			rec.ReqBytes = len(payload)
 			return c.once(ctx, payload, rec)
+		}
+		// The gonka gateway answers an IDENTICAL request body from its cache —
+		// a repeated batch comes back byte-for-byte in ~90 ms. A malformed
+		// reply is therefore permanent for that body: measured, 16 French
+		// sentences returned the same truncated JSON on six consecutive
+		// attempts across two runs and shipped untranslated. So a retry after a
+		// parse failure changes the body, using the OpenAI-standard "user"
+		// field that already exists for exactly this purpose. It changes
+		// nothing about sampling and is ignored by servers that do not read it.
+		revary = func(attempt int) {
+			req.User = retryTag(c.opts.UserTag, attempt)
+			if next, mErr := json.Marshal(req); mErr == nil {
+				payload = next
+			}
 		}
 		// An endpoint that mandates reasoning 400s on the switch above, which
 		// would fail the whole run on its first batch (the glossary call).
@@ -298,6 +333,11 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 			rec.Err = clip(err.Error(), 200)
 			c.opts.Stats.log(rec)
 			lastErr = err
+			// A truncated reply carries its partial content; show it to a
+			// caller that asked to see raw replies, then fail as usual.
+			if content != "" && c.opts.OnContent != nil {
+				c.opts.OnContent(content)
+			}
 			if ae, ok := err.(*apiError); ok && ae.permanent() {
 				if adapt != nil && adapt(err) {
 					wait = 0
@@ -308,16 +348,25 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 			if _, ok := errors.AsType[*UsageLimitError](err); ok {
 				return err // waiting out a usage window is the caller's call
 			}
+			if _, ok := errors.AsType[*ModelNotFoundError](err); ok {
+				return err // the id is not served; every retry answers the same 404
+			}
 			if ce, ok := errors.AsType[*cliError](err); ok && ce.perm {
 				return err // bad model / logged out — retrying cannot help
 			}
 			wait = backoff(attempt, retryAfter)
 			continue
 		}
+		if c.opts.OnContent != nil {
+			c.opts.OnContent(content)
+		}
 		if perr := parse(content); perr != nil {
 			rec.Err = clip("parse: "+perr.Error(), 200)
 			c.opts.Stats.log(rec)
 			lastErr = fmt.Errorf("parse response: %w", perr)
+			if revary != nil {
+				revary(attempt + 1)
+			}
 			wait = backoff(attempt, 0)
 			continue
 		}
@@ -325,6 +374,49 @@ func (c *Client) chat(ctx context.Context, system, userJSON string, parse func(c
 		return nil
 	}
 	return lastErr
+}
+
+// ModelNotFoundError is a 404 from the chat endpoint: the model id is not
+// served. It aborts the run instead of failing every batch identically — on the
+// gonka gateway the served list changes within hours, and the shipped default
+// has answered 404 for days at a time, so the message names what IS served.
+type ModelNotFoundError struct {
+	Model    string
+	Provider string
+	BaseURL  string
+	Served   []string // parsed from the 404 body, when it names one
+	Message  string
+}
+
+func (e *ModelNotFoundError) Error() string {
+	s := fmt.Sprintf("%s does not serve model %q (404)", e.Provider, e.Model)
+	if len(e.Served) > 0 {
+		return s + " — it serves: " + strings.Join(e.Served, ", ") + "\nRe-run with --model <one of those>."
+	}
+	if e.Message != "" {
+		s += ": " + e.Message
+	}
+	return s + "\nAsk the gateway what it serves, then re-run with --model."
+}
+
+// servedModelsRE pulls the id list out of a 404 body that names one
+// ("Supported models: a, b, c"). The gonka gateway writes exactly this, and it
+// is more current than its own /v1/models, which has advertised an id for nine
+// minutes after the endpoint stopped accepting it.
+var servedModelsRE = regexp.MustCompile(`(?i)(?:supported|available) models:?\s*([^\n"}]+)`)
+
+func servedFromError(msg string) []string {
+	m := servedModelsRE.FindStringSubmatch(msg)
+	if m == nil {
+		return nil
+	}
+	var out []string
+	for _, id := range strings.Split(m[1], ",") {
+		if id = strings.Trim(strings.TrimSpace(id), "\"'`.;"); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // UsageLimitError signals the Claude subscription hit its usage-window cap.
@@ -490,6 +582,9 @@ func (c *Client) ChatJSON(ctx context.Context, system, userJSON string, out any)
 // Model returns the model id this client sends requests with.
 func (c *Client) Model() string { return c.opts.Model }
 
+// MaxRetries is the per-request retry budget this client was built with.
+func (c *Client) MaxRetries() int { return c.opts.MaxRetries }
+
 // TranslateText runs the TRANSLATE pass: returns the parsed id→translation-text
 // map (each value a plain string, not chunks).
 func (c *Client) TranslateText(ctx context.Context, system, userJSON string) (map[string]string, error) {
@@ -543,6 +638,10 @@ func (c *Client) once(ctx context.Context, payload []byte, rec *statRec) (string
 		if json.Unmarshal(body, &cr) == nil && cr.Error != nil && cr.Error.Message != "" {
 			msg = cr.Error.Message
 		}
+		if resp.StatusCode == http.StatusNotFound {
+			return "", 0, &ModelNotFoundError{Model: c.opts.Model, Provider: c.providerLabel(),
+				BaseURL: c.opts.BaseURL, Served: servedFromError(msg), Message: clip(msg, 300)}
+		}
 		if len(msg) > 300 {
 			msg = msg[:300]
 		}
@@ -567,7 +666,12 @@ func (c *Client) once(ctx context.Context, payload []byte, rec *statRec) (string
 	}
 	rec.FinishReason = cr.Choices[0].FinishReason
 	if cr.Choices[0].FinishReason == "length" {
-		return "", 0, errTruncated
+		// The partial rides along with the error so a caller with OnContent can
+		// SEE it. Until B1c a truncated reply was discarded here and the report
+		// could only say "it cannot be quoted"; the glossary pass truncating on
+		// deepseek-ai/DeepSeek-V4-Flash-0731 was undiagnosable for that reason.
+		// It is still an error: nothing downstream may treat it as an answer.
+		return cr.Choices[0].Message.Content, 0, errTruncated
 	}
 	return cr.Choices[0].Message.Content, 0, nil
 }
@@ -579,6 +683,8 @@ func parseChunks(content string) (map[string][]align.Chunk, error) {
 	var m map[string][]align.Chunk
 	if err := json.Unmarshal([]byte(s), &m); err == nil {
 		return m, nil
+	} else if nd, ok := mergeJSONStream[[]align.Chunk](s); ok {
+		return nd, nil
 	} else if obj := extractObject(s); obj != "" {
 		if err2 := json.Unmarshal([]byte(obj), &m); err2 == nil {
 			return m, nil
@@ -590,12 +696,15 @@ func parseChunks(content string) (map[string][]align.Chunk, error) {
 }
 
 // parseTexts extracts the id→translation-string object from a translate-pass
-// reply, tolerating code fences and surrounding prose (mirrors parseChunks).
+// reply, tolerating code fences, surrounding prose (mirrors parseChunks) and a
+// newline-delimited sequence of objects (mergeNDJSON).
 func parseTexts(content string) (map[string]string, error) {
 	s := stripFences(stripThink(content))
 	var m map[string]string
 	if err := json.Unmarshal([]byte(s), &m); err == nil {
 		return m, nil
+	} else if nd, ok := mergeNDJSON(s); ok {
+		return nd, nil
 	} else if obj := extractObject(s); obj != "" {
 		if err2 := json.Unmarshal([]byte(obj), &m); err2 == nil {
 			return m, nil
@@ -604,6 +713,61 @@ func parseTexts(content string) (map[string]string, error) {
 	} else {
 		return nil, err
 	}
+}
+
+// mergeNDJSON reads the reply as a STREAM of JSON values instead of one, which
+// rescues the two malformed shapes DeepSeek-V4-Flash-0731 produces on the gonka
+// gateway. Both are well-formed JSON with something the strict parse will not
+// accept next to it, and `extractObject` cannot rescue either, because it spans
+// from the first "{" to the last "}" and so swallows whatever follows:
+//
+//   - one object per LINE instead of one object — ~8% of requests in the
+//     served-model probe, translations correct and in the target language;
+//   - one object followed by trailing commentary — 15 of 100 translate requests
+//     in the B1 measurement run, reported as
+//     `parse: invalid character '#' after top-level value`. Three rounds of
+//     retries returned the same shape and 8 sentences shipped untranslated.
+//
+// Reading as a stream takes whatever complete objects are there and stops at
+// the first thing that is not one: a truncated reply still fails (its first
+// value never closes), and the ids the model did not return are simply absent,
+// which the round loop already retries. The merge stays narrow otherwise: every
+// value must be a string and no id may appear twice, because a repeated id
+// means the objects are alternatives rather than parts of one answer, and
+// guessing which was meant is worse than a retry.
+func mergeNDJSON(s string) (map[string]string, bool) { return mergeJSONStream[string](s) }
+
+// mergeJSONStream is the shape-agnostic half, so the align reply (id → chunks)
+// gets exactly the same tolerance as the translate reply (id → text): both come
+// from the same model over the same gateway and fail the same way.
+func mergeJSONStream[T any](s string) (map[string]T, bool) {
+	dec := json.NewDecoder(strings.NewReader(s))
+	out := map[string]T{}
+	objects := 0
+	for {
+		var m map[string]T
+		err := dec.Decode(&m)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			if objects == 0 {
+				return nil, false // nothing usable: not this shape
+			}
+			break // trailing junk after a complete answer
+		}
+		objects++
+		for k, v := range m {
+			if _, dup := out[k]; dup {
+				return nil, false
+			}
+			out[k] = v
+		}
+	}
+	if objects == 0 || len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 // stripThink drops the leading <think>…</think> block some reasoning models
@@ -644,6 +808,18 @@ func extractObject(s string) string {
 		return s[start : end+1]
 	}
 	return ""
+}
+
+// retryTag is the per-attempt value of the request's "user" field. It keeps
+// whatever the caller set (the benchmarks use it to bust the same cache) and
+// appends the attempt, so successive retries of one batch differ from each
+// other and from the first try.
+func retryTag(base string, attempt int) string {
+	tag := "retry-" + strconv.Itoa(attempt)
+	if base == "" {
+		return tag
+	}
+	return base + "/" + tag
 }
 
 func parseRetryAfter(h string) time.Duration {

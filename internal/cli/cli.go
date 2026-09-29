@@ -33,7 +33,9 @@ import (
 	"github.com/dimando/reader/converter/internal/progress"
 	"github.com/dimando/reader/converter/internal/segment"
 	"github.com/dimando/reader/converter/internal/tbook"
+	v2 "github.com/dimando/reader/converter/internal/tbook/v2"
 	"github.com/dimando/reader/converter/internal/translate"
+	"github.com/dimando/reader/converter/internal/typography"
 )
 
 // statsLog is the shared per-request JSONL sink (--stats); nil = disabled.
@@ -114,15 +116,18 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		sentences     []*tbook.Sentence // chapter prose + figure captions + table cells
 		noteSents     []*tbook.Sentence
 		citeSents     []*tbook.Sentence
-		writeTargets  []string // final manifest targetLangs
+		writeTargets  []string    // final manifest targetLangs
+		srcID         *v2.Source  // --format v2: which document this came from (§3.6)
+		appendTo      *v2.Archive // a version-2 input: the new languages are appended (§2.4)
 	)
 
 	if strings.HasSuffix(cfg.Input, ".tbook") {
 		fmt.Printf("Reading %s ...\n", cfg.Input)
-		rb, err := tbook.Read(cfg.Input)
+		rb, arc, err := readTbookInput(cfg)
 		if err != nil {
-			return fmt.Errorf("read tbook: %w", err)
+			return err
 		}
+		appendTo = arc
 		cfg.Source = rb.Source // the archive is authoritative for the source language
 		title, author = rb.Title, rb.Author
 		cover, images, notes, meta = rb.Cover, rb.Images, rb.Notes, rb.Meta
@@ -169,6 +174,9 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		notes, noteSents, citeSents = segment.BuildNotes(book.Notes, cfg.Source)
 		title, author, cover, images = book.Title, book.Author, book.Cover, book.Images
 		writeTargets = cfg.Targets
+		if cfg.Format == config.FormatV2 {
+			srcID = sourceIdentity(cfg.Input, book)
+		}
 	}
 
 	// Everything below translates `translatable`; citations join it unless
@@ -198,6 +206,10 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		return err
 	}
 
+	// One lexicon loader for the whole run: the glossary gates and miner and
+	// the hybrid align gate want the same per-target dictionaries.
+	lexDicts := lexDictLoader(cfg)
+
 	// The glossary is a user-editable JSON file alongside the output .tbook
 	// (--only-glossary writes and opens it for editing before any translation
 	// runs). Once it exists, every later run loads it verbatim — edits
@@ -210,7 +222,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	// put Russian into 50–73% of their sentences — bench-quality/reports/
 	// four-model-bench-2026-08.md §8).
 	wantGlossary := cfg.Glossary || cfg.OnlyGlossary
-	glossaries := resolveGlossaries(cfg, title, author, len(sentences))
+	glossaries := resolveGlossaries(cfg, title, author, len(sentences), lexDicts)
 	needsGlossaryBuild := false
 	for _, g := range glossaries {
 		needsGlossaryBuild = needsGlossaryBuild || g.needsBuild
@@ -290,14 +302,13 @@ func convert(cfg *config.Config, runStart time.Time) error {
 			}
 		}
 		client = translate.NewClient(clientOptions(cfg, cfg.Model, cfg.Temperature))
+		if err := checkPassKeys(cfg); err != nil {
+			return err
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	// One lexicon loader for the whole run: the glossary miner and the hybrid
-	// align gate want the same per-target dictionaries.
-	lexDicts := lexDictLoader(cfg)
 
 	// Glossary pass: build the book glossary unless the sidecar already
 	// supplied one (loaded above, along with its cache namespace) — the hash
@@ -320,7 +331,8 @@ func convert(cfg *config.Config, runStart time.Time) error {
 				if berr != nil {
 					return fmt.Errorf("glossary %s→%s: %w", cfg.Source, g.target, berr)
 				}
-				g.entries, g.cacheModel = entries, translate.CacheKeyModel(cfg.Model, ghash)
+				g.entries, g.cacheModel = entries, translate.CacheKeyModel(nsModel(cfg), ghash)
+				gateGlossary(cfg, g, lexDicts)
 				if werr := translate.WriteGlossaryFile(g.path, g.scope, g.entries); werr != nil {
 					fmt.Printf("Glossary: couldn't write %s (%v) — edits won't be picked up next run\n", g.path, werr)
 				}
@@ -349,6 +361,9 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		}
 	}
 
+	// Held past the translate block so the language gate can re-translate with
+	// the same client, aligner and settings instead of a second configuration.
+	var pipe *translate.Pipeline
 	if pending := countPending(); pending > 0 {
 		via := cfg.Model
 		switch cfg.Provider {
@@ -370,20 +385,28 @@ func convert(cfg *config.Config, runStart time.Time) error {
 					"(better fixes, ~3x this phase's time).\n", cfg.RepairContext, cfg.RepairContext)
 			}
 		}
-		pipe := &translate.Pipeline{
+		pipe = &translate.Pipeline{
 			Client: client, CacheDir: cfg.CacheDir, Source: cfg.Source,
 			BatchSize: cfg.BatchSize, AlignBatch: cfg.AlignBatch,
 			Concurrency: cfg.Concurrency,
 			Force:       cfg.Force,
 			Repair:      cfg.Repair, RepairContext: cfg.RepairContext,
 			AlignMode: cfg.AlignMode, EmbQMin: cfg.EmbQMin,
-			Progress: progressLog,
+			Progress:    progressLog,
+			Expressions: cfg.Expressions, NoMirror: cfg.NoMirror,
+		}
+		if cfg.Expressions {
+			fmt.Println("EXPERIMENTAL expression pass ON (idiom/phrasal-verb tags feed the translate prompt).")
+		}
+		if cfg.NoMirror {
+			fmt.Println("EXPERIMENTAL translate prompt without the mirror-the-source clause.")
 		}
 		if cfg.AlignMode != config.AlignLLM {
 			fmt.Printf("Starting embedding aligner (%s, %s) ...\n", cfg.EmbModel, cfg.EmbMethod)
 			aligner, err := embalign.Start(embalign.Options{
 				Python: cfg.EmbPython, Script: cfg.EmbScript,
 				Model: cfg.EmbModel, Layer: cfg.EmbLayer, Method: cfg.EmbMethod,
+				SrcLang: cfg.Source,
 			})
 			switch {
 			case err == nil:
@@ -445,14 +468,24 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	// --escalate-model, everything flagged is immediately redone by the
 	// stronger model — in the primary cache namespace, so the book stays one
 	// cheap-model file with only the hard few percent escalated.
+	// The language gate runs FIRST, before lexcheck, the judge scope and the
+	// align gate consume anything: on a contaminated book lexcheck's flag list
+	// IS the contamination (1011 of 1017 German flags in 19.tbook are
+	// wrong-language cells), and it reports every one of them as low-support —
+	// suspected positional drift, whose remedy cannot fix a sentence that is in
+	// the wrong language. Everything downstream spends its budget on a defect it
+	// cannot see, let alone repair, unless this runs first.
+	if err := runLangGate(ctx, cfg, glossaries, translatable, pipe); err != nil {
+		return err
+	}
 	flaggedSet := map[string]bool{}
 	if cfg.Lexcheck {
 		for _, src := range runLexcheck(cfg, translatable) {
 			flaggedSet[src] = true
 		}
 	}
-	// Wrong-language output is invisible to every other gate, so this one always
-	// runs: it is a pure string check over the text already in memory.
+	// Wrong-language output is invisible to every other gate, so the report
+	// always runs: it is a pure string check over the text already in memory.
 	runLangcheck(cfg, translatable)
 	if cfg.Judge {
 		judgeInput := translatable
@@ -471,6 +504,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		}
 		reportCalibration(sample, flagged)
 	}
+	esc := newEscalationOutcome()
 	if cfg.EscalateModel != "" && len(flaggedSet) > 0 {
 		flagged := make([]string, 0, len(flaggedSet))
 		for src := range flaggedSet {
@@ -478,17 +512,17 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		}
 		sort.Strings(flagged)
 		t0 := time.Now()
-		if err := escalate(ctx, cfg, glossaries, translatable, flagged); err != nil {
-			return err
-		}
-		// A stronger model is not a verified model: re-run the same gates over
-		// the escalated output, give it one redo, and fall back for whatever
-		// still fails — never ship an unvetted rewrite.
-		if err := reverifyEscalated(ctx, cfg, glossaries, translatable, flagged); err != nil {
+		emb := &lazyAligner{cfg: cfg, pipe: pipe}
+		err := escalate(ctx, cfg, glossaries, translatable, flagged, esc, emb.get)
+		emb.close()
+		if err != nil {
 			return err
 		}
 		fmt.Printf("Escalation wall time: %s\n", time.Since(t0).Round(time.Second))
 	}
+
+	gates := finalizeCells(cfg, allSents, writeTargets, skippedCitations(cfg, citeSents), esc,
+		outChapters, notes, appendTo != nil || cfg.Format == config.FormatV2)
 
 	fmt.Printf("Writing %s ...\n", cfg.Out)
 	progressLog.Update("assemble", "", 0, 1)
@@ -503,7 +537,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	for _, g := range glossaries {
 		glossTerms += len(g.entries)
 	}
-	meta.AppendRun(metaRun(cfg, cfg.Targets, glossTerms, runStart))
+	run := metaRun(cfg, cfg.Targets, glossTerms, runStart)
 	out := &tbook.Book{
 		Title: title, Author: author,
 		Source: cfg.Source, Targets: writeTargets,
@@ -511,6 +545,28 @@ func convert(cfg *config.Config, runStart time.Time) error {
 		Meta:     meta,
 		Chapters: outChapters,
 	}
+	if appendTo != nil {
+		run.Options["tokenizer"] = v2.TokenizerID
+		if err := appendV2(cfg, out, appendTo, run, gates); err != nil {
+			return err
+		}
+		progressLog.Update("assemble", "", 1, 1)
+		fmt.Printf("Total wall time: %s\n", time.Since(runStart).Round(time.Second))
+		return nil
+	}
+	if cfg.Format == config.FormatV2 {
+		// The tokenizer the links are written against; §3.10 asks for it and
+		// §11.2 makes it the aligner's contract with every consumer.
+		run.Options["tokenizer"] = v2.TokenizerID
+		// migrate appends the run record itself, so meta is left alone here.
+		if err := writeV2(cfg, out, srcID, run, gates); err != nil {
+			return err
+		}
+		progressLog.Update("assemble", "", 1, 1)
+		fmt.Printf("Total wall time: %s\n", time.Since(runStart).Round(time.Second))
+		return nil
+	}
+	meta.AppendRun(run)
 	if err := tbook.Write(cfg.Out, out); err != nil {
 		return fmt.Errorf("assemble: %w", err)
 	}
@@ -541,6 +597,45 @@ func convert(cfg *config.Config, runStart time.Time) error {
 	}
 	fmt.Printf("Total wall time: %s\n", time.Since(runStart).Round(time.Second))
 	return nil
+}
+
+// finalizeCells resolves the v2 gate state (when wantGates) and only then runs
+// the typography pass. Gate outcomes are keyed by source sentence but derived
+// from the translation text — the verdict cache keys on the exact text and
+// alignment — so they must be read against the text the gates saw; annotate
+// later stamps them on the post-typography cell. The v1 file carries no gate
+// state, so there the order does not matter.
+func finalizeCells(cfg *config.Config, sents []*tbook.Sentence, targets []string,
+	citations map[*tbook.Sentence]bool, esc *escalationOutcome,
+	chapters []tbook.Chapter, notes map[string]*tbook.Note, wantGates bool) *gateState {
+
+	var g *gateState
+	if wantGates {
+		g = newGateState(cfg, sents, targets, citations, esc)
+	}
+	if cfg.Typography {
+		applyTypography(cfg.Targets, chapters, notes)
+	}
+	return g
+}
+
+// applyTypography runs the punctuation pass over this run's targets, body and
+// notes, after every gate so judges and aligners saw the raw model text.
+func applyTypography(targets []string, chapters []tbook.Chapter, notes map[string]*tbook.Note) {
+	for _, t := range targets {
+		if !typography.Supported(t) {
+			fmt.Printf("Typography: no rules for %s, skipped.\n", t)
+			continue
+		}
+		n := 0
+		for _, ch := range chapters {
+			n += typography.ApplyParagraphs(ch.Paragraphs, t)
+		}
+		for _, note := range notes {
+			n += typography.ApplyParagraphs(note.Paragraphs, t)
+		}
+		fmt.Printf("Typography: %d %s cells changed.\n", n, t)
+	}
 }
 
 // judgeScopeFlagged selects the sentences worth judging when --judge-scope
@@ -705,6 +800,37 @@ func clientOptions(cfg *config.Config, model string, temperature float64) transl
 	}
 }
 
+// checkPassKeys fails early when the judge or escalator runs on another
+// metered backend whose API key is missing.
+func checkPassKeys(cfg *config.Config) error {
+	for _, p := range []struct {
+		on       bool
+		flag, pv string
+	}{
+		{cfg.Judge, "--judge-provider", cfg.JudgeProvider},
+		{cfg.EscalateModel != "", "--escalate-provider", cfg.EscalateProvider},
+	} {
+		if !p.on || p.pv == cfg.Provider || (p.pv != config.ProviderOpenRouter && p.pv != config.ProviderGonka) {
+			continue
+		}
+		if _, key := config.Endpoint(p.pv); key == "" {
+			return fmt.Errorf("%s %s: its API key (%s_API_KEY) is not set", p.flag, p.pv, strings.ToUpper(p.pv))
+		}
+	}
+	return nil
+}
+
+// clientOptionsVia is clientOptions on the judge's or escalator's own backend
+// (--judge-provider / --escalate-provider): same limits, that endpoint and key.
+func clientOptionsVia(cfg *config.Config, provider, model string, temperature float64) translate.Options {
+	o := clientOptions(cfg, model, temperature)
+	if provider != "" && provider != cfg.Provider {
+		o.Provider = provider
+		o.BaseURL, o.APIKey = config.Endpoint(provider)
+	}
+	return o
+}
+
 // lexDictLoader supplies per-target lexcheck dictionaries for the hybrid
 // align gate, caching loads. A missing lexicon disables the lexcheck part of
 // the gate for that target (the coverage threshold still applies).
@@ -848,6 +974,12 @@ func runLexcheckTarget(cfg *config.Config, sentences []*tbook.Sentence, target s
 }
 
 // subsetBySrc returns the unique sentences whose source is in srcs.
+// nsModel is the model component every cache namespace of this run builds on:
+// the model id plus the translate-prompt variant ("" for production).
+func nsModel(cfg *config.Config) string {
+	return cfg.Model + translate.TranslateVariant(cfg.Expressions, cfg.NoMirror)
+}
+
 // finalModel is the cache namespace of the FINAL aligned entry: the glossary
 // namespace, plus the repair marker when the run proofreads — an alignment of
 // proofread text must never answer for an unrepaired run.
@@ -875,11 +1007,12 @@ type glossaryNS struct {
 // already exists (offline, no LLM). A target whose file is missing or belongs to
 // another book is marked for the glossary pass; with --no-glossary every target
 // keeps the plain model namespace.
-func resolveGlossaries(cfg *config.Config, title, author string, nSentences int) []*glossaryNS {
+func resolveGlossaries(cfg *config.Config, title, author string, nSentences int,
+	lex func(string) *lexcheck.Dict) []*glossaryNS {
 	wantGlossary := cfg.Glossary || cfg.OnlyGlossary
 	out := make([]*glossaryNS, 0, len(cfg.Targets))
 	for _, target := range cfg.Targets {
-		g := &glossaryNS{target: target, cacheModel: cfg.Model}
+		g := &glossaryNS{target: target, cacheModel: nsModel(cfg)}
 		g.scope = translate.GlossaryScope{
 			Source: cfg.Source, Target: target,
 			Title: title, Author: author, Sentences: nSentences,
@@ -891,9 +1024,15 @@ func resolveGlossaries(cfg *config.Config, title, author string, nSentences int)
 				if entries, lerr := translate.LoadGlossaryFile(g.path, g.scope); lerr == nil {
 					// The hash must be known before the pending count: it
 					// namespaces the cache, and a file-supplied glossary needs
-					// no LLM to produce it.
+					// no LLM to produce it. The gates run FIRST, for the same
+					// reason: a sidecar is loaded verbatim, so nothing else ever
+					// examined a hand-edited or carried-over entry.
 					g.entries, g.needsBuild = entries, false
-					g.cacheModel = translate.CacheKeyModel(cfg.Model, translate.GlossHash(entries))
+					if gateGlossary(cfg, g, lex) {
+						if werr := translate.WriteGlossaryFile(g.path, g.scope, g.entries); werr != nil {
+							fmt.Printf("Glossary [%s]: couldn't rewrite %s (%v)\n", g.target, g.path, werr)
+						}
+					}
 				} else if !errors.Is(lerr, fs.ErrNotExist) {
 					fmt.Printf("Glossary: ignoring %s (%v) — rebuilding\n", g.path, lerr)
 				}
@@ -902,6 +1041,52 @@ func resolveGlossaries(cfg *config.Config, title, author string, nSentences int)
 		out = append(out, g)
 	}
 	return out
+}
+
+// gateGlossary applies the entry gates to one target's glossary, whatever
+// produced it, and sets the cache namespace from what survives. It reports
+// whether the glossary changed, so a sidecar is only rewritten when it did.
+//
+// Two gates, both closing a measured defect. The script gate drops a rendering
+// written in a script the target does not use — an en→ru glossary enforced on
+// six Latin targets put Russian into 55-73% of their sentences, and five
+// self-equal Latin entries tripled Latin leakage into Russian. The suspect gate
+// only MARKS: a one-word rendering the bilingual lexicon does not know while it
+// knows a spelling a letter or two away (`escritoire → эскртуар`, 27 hits). A
+// marked entry is still enforced — a dictionary does not get to overrule a
+// book's own terminology — but it loses the proofreader's never-change
+// protection, which is what made the typo survive all nine of its occurrences.
+func gateGlossary(cfg *config.Config, g *glossaryNS, lex func(string) *lexcheck.Dict) bool {
+	var dict translate.SuspectLexicon
+	if lex != nil {
+		if d := lex(g.target); d != nil {
+			dict = d
+		}
+	}
+	before := translate.GlossHash(g.entries) + "|" + suspectDigest(g.entries)
+	kept, dropped := translate.GateGlossary(g.entries, cfg.Source, g.target, dict)
+	translate.ReportGlossDrops(g.target, dropped)
+	g.entries = kept
+	g.cacheModel = translate.CacheKeyModel(nsModel(cfg), translate.GlossHash(kept))
+	if sus := translate.Suspects(kept); len(sus) > 0 {
+		fmt.Printf("Glossary [%s]: %d suspect rendering(s) — the lexicon knows a near spelling; "+
+			"kept enforced, but the proofread pass may correct them\n", g.target, len(sus))
+		for _, e := range sus {
+			fmt.Printf("  %q → %q (lexicon has %q)\n", e.Src, e.Tgt, e.Suspect)
+		}
+	}
+	return before != translate.GlossHash(kept)+"|"+suspectDigest(kept)
+}
+
+// suspectDigest is the marked-entry set, for the changed check above.
+func suspectDigest(entries []translate.GlossEntry) string {
+	var sb strings.Builder
+	for _, e := range entries {
+		if e.Suspect != "" {
+			sb.WriteString(e.Src + "=" + e.Suspect + ";")
+		}
+	}
+	return sb.String()
 }
 
 // runInvalidate clears the cached artifacts of the listed sentences and exits,
@@ -1051,137 +1236,6 @@ func subsetBySrc(sentences []*tbook.Sentence, srcs []string) []*tbook.Sentence {
 	return subset
 }
 
-// escalateRun redoes a subset (translate + align) with the stronger
-// --escalate-model, overwriting their entries in the PRIMARY model's cache
-// namespace, then refreshes them from cache.
-func escalateRun(ctx context.Context, cfg *config.Config, glossaries []*glossaryNS,
-	subset []*tbook.Sentence) error {
-
-	ec := translate.NewClient(clientOptions(cfg, cfg.EscalateModel, cfg.Temperature))
-	pipe := &translate.Pipeline{
-		Client: ec, CacheDir: cfg.CacheDir, Source: cfg.Source,
-		BatchSize: cfg.BatchSize, AlignBatch: cfg.AlignBatch,
-		Concurrency: cfg.Concurrency,
-		Force:       true, // redo even though (bad) entries are cached
-	}
-	found, missing := 0, 0
-	for _, g := range glossaries {
-		pipe.Glossary, pipe.CacheModel = g.entries, g.cacheModel
-		if err := pipe.Run(ctx, subset, []string{g.target}); err != nil {
-			return err
-		}
-		f, m := translate.FillFromCache(subset, []string{g.target}, cfg.CacheDir, cfg.Source,
-			finalModel(cfg, g.cacheModel), g.cacheModel, repairModel(cfg, g.cacheModel))
-		found, missing = found+f, missing+m
-	}
-	fmt.Printf("Escalation done: %d refreshed (%d missing).\n", found, missing)
-	return nil
-}
-
-func escalate(ctx context.Context, cfg *config.Config, glossaries []*glossaryNS,
-	sentences []*tbook.Sentence, flagged []string) error {
-
-	subset := subsetBySrc(sentences, flagged)
-	if len(subset) == 0 {
-		return nil
-	}
-	fmt.Printf("Escalating %d flagged sentences to %s ...\n", len(subset), cfg.EscalateModel)
-	return escalateRun(ctx, cfg, glossaries, subset)
-}
-
-// reverifyEscalated closes the loop escalation used to leave open: the same
-// gates (lexcheck + judge) re-check the escalated output, anything still
-// flagged gets ONE more escalation attempt, and persistent failures fall back
-// — a judged mistranslation loses its translation entirely (re-translated on
-// the next run), an alignment failure keeps the raw translation with no
-// highlights. Nothing the gates rejected ships silently.
-func reverifyEscalated(ctx context.Context, cfg *config.Config, glossaries []*glossaryNS,
-	sentences []*tbook.Sentence, flagged []string) error {
-
-	subset := subsetBySrc(sentences, flagged)
-	if len(subset) == 0 || (!cfg.Lexcheck && !cfg.Judge) {
-		return nil
-	}
-	verify := func(set []*tbook.Sentence) ([]string, error) {
-		bad := map[string]bool{}
-		if cfg.Lexcheck {
-			if dict, err := lexcheck.Load(cfg.LexiconDir, cfg.Source, cfg.Targets[0]); err == nil && dict != nil {
-				for _, s := range set {
-					if dict.CheckSentence(s, cfg.Targets[0]).Flagged {
-						bad[s.Src] = true
-					}
-				}
-			}
-		}
-		if cfg.Judge {
-			jc := translate.NewClient(clientOptions(cfg, cfg.JudgeModel, 0))
-			// No progress sink: re-verification covers a small escalated
-			// subset and would only emit confusing extra "judge" phases.
-			rep, err := translate.Judge(ctx, jc, cfg.CacheDir, cfg.Source, cfg.Targets,
-				set, max(1, cfg.BatchSize/2), cfg.Concurrency, nil)
-			if err != nil {
-				return nil, err
-			}
-			for _, src := range rep.FlaggedSrcs {
-				bad[src] = true
-			}
-		}
-		out := make([]string, 0, len(bad))
-		for src := range bad {
-			out = append(out, src)
-		}
-		sort.Strings(out)
-		return out, nil
-	}
-
-	fmt.Printf("Re-verifying %d escalated sentences ...\n", len(subset))
-	still, err := verify(subset)
-	if err != nil {
-		return err
-	}
-	if len(still) > 0 { // one redo, then re-check
-		fmt.Printf("Re-escalating %d still-flagged sentences ...\n", len(still))
-		if err := escalateRun(ctx, cfg, glossaries, subsetBySrc(subset, still)); err != nil {
-			return err
-		}
-		if still, err = verify(subsetBySrc(subset, still)); err != nil {
-			return err
-		}
-	}
-	if len(still) == 0 {
-		fmt.Println("Escalation verified clean.")
-		return nil
-	}
-
-	// Persistent failures: strip what the gates rejected and refill from cache.
-	dropped, kept := 0, 0
-	for _, s := range subsetBySrc(subset, still) {
-		for _, g := range glossaries {
-			mistranslated := false
-			if v, ok := translate.VerdictFor(cfg.CacheDir, cfg.JudgeModel, cfg.Source, g.target, s); ok {
-				mistranslated = strings.Contains(v.Why, "mistranslation")
-			}
-			cache.Remove(cfg.CacheDir, cache.Key(s.Src, cfg.Source, g.target, g.cacheModel))
-			if mistranslated {
-				cache.Remove(cfg.CacheDir, cache.TrKey(s.Src, cfg.Source, g.target, g.cacheModel))
-				dropped++
-			} else {
-				kept++
-			}
-		}
-	}
-	for _, g := range glossaries {
-		translate.FillFromCache(subsetBySrc(subset, still), []string{g.target}, cfg.CacheDir, cfg.Source,
-			finalModel(cfg, g.cacheModel), g.cacheModel, repairModel(cfg, g.cacheModel))
-	}
-	path := cfg.Out + ".unverified.json"
-	_ = translate.WriteFlagged(path, still)
-	fmt.Printf("Escalation left %d sentences unverified (%d ship raw with no highlights, "+
-		"%d ship untranslated) — listed in %s; re-run to retry them.\n",
-		len(still), kept, dropped, path)
-	return nil
-}
-
 // runJudge judges every translated sentence, reports the verdict spread, and
 // writes flagged sources to <out>.flagged.json (the --invalidate format). With
 // --judge-invalidate the flagged cache entries are cleared immediately, so the
@@ -1189,7 +1243,7 @@ func reverifyEscalated(ctx context.Context, cfg *config.Config, glossaries []*gl
 // flagged source sentences.
 func runJudge(ctx context.Context, cfg *config.Config, glossaries []*glossaryNS,
 	sentences []*tbook.Sentence) ([]string, error) {
-	jc := translate.NewClient(clientOptions(cfg, cfg.JudgeModel, 0))
+	jc := translate.NewClient(clientOptionsVia(cfg, cfg.JudgeProvider, cfg.JudgeModel, 0))
 	fmt.Printf("Judging translations via %s ...\n", cfg.JudgeModel)
 	// Judge batches are smaller than translate batches: each item carries the
 	// full alignment, and verdict quality drops with oversized prompts (capped

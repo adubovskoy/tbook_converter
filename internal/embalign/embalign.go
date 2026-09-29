@@ -35,7 +35,13 @@ type Options struct {
 	Script string // aligner script; empty = "tools/embalign.py"
 	Model  string // HF model id; empty = "sentence-transformers/LaBSE"
 	Layer  int    // hidden layer for token embeddings; 0 = 8
-	Method string // "argmax" (precision-first, default) or "itermax"
+	Method string // "itermax-silent-cc" (default), "argmax", "itermax", "itermax-guarded",
+	// "itermax-silent" or "itermax-silent-cc" — passed to the child verbatim
+
+	// SrcLang is the source language code. Only the closed-class methods
+	// ("itermax-guarded", "itermax-silent-cc") read it; empty leaves the child
+	// at its own default and keeps the child command line exactly what it was.
+	SrcLang string
 }
 
 func (o *Options) fill() {
@@ -52,7 +58,7 @@ func (o *Options) fill() {
 		o.Layer = 8
 	}
 	if o.Method == "" {
-		o.Method = "argmax"
+		o.Method = "itermax-silent-cc"
 	}
 }
 
@@ -122,8 +128,12 @@ func Start(opts Options) (*Aligner, error) {
 	if _, err := os.Stat(opts.Script); err != nil {
 		return nil, fmt.Errorf("aligner script %s: %w", opts.Script, err)
 	}
-	cmd := exec.Command(opts.Python, opts.Script, "--serve",
-		"--model", opts.Model, "--layer", strconv.Itoa(opts.Layer), "--methods", opts.Method)
+	args := []string{opts.Script, "--serve",
+		"--model", opts.Model, "--layer", strconv.Itoa(opts.Layer), "--methods", opts.Method}
+	if opts.SrcLang != "" {
+		args = append(args, "--src-lang", opts.SrcLang)
+	}
+	cmd := exec.Command(opts.Python, args...)
 	cmd.Stderr = os.Stderr
 	in, err := cmd.StdinPipe()
 	if err != nil {

@@ -41,7 +41,7 @@ func fullConfig() *config.Config {
 		EmbPython: "/home/someone/.venv-embalign/bin/python",
 		EmbScript: "/home/someone/tools/embalign.py",
 		EmbModel:  "sentence-transformers/LaBSE",
-		EmbMethod: "argmax", EmbQMin: 0.6,
+		EmbMethod: "argmax", EmbLayer: 8, EmbQMin: 0.6,
 
 		SkipCitations: true, LimitChapters: 3,
 	}
@@ -90,7 +90,7 @@ func TestMetaRunRecordsProvenance(t *testing.T) {
 	for key, want := range map[string]any{
 		"alignMode": config.AlignHybrid, "batchSize": 24, "concurrency": 8,
 		"glossary": true, "glossaryTerms": 42, "judge": true, "judgeScope": config.JudgeScopeFlagged,
-		"embMethod": "argmax", "skipCitations": true, "limitChapters": 3,
+		"embMethod": "argmax", "embLayer": 8, "skipCitations": true, "limitChapters": 3,
 	} {
 		if r.Options[key] != want {
 			t.Errorf("options[%q] = %v, want %v", key, r.Options[key], want)
@@ -144,6 +144,9 @@ func TestMetaRunAlignModes(t *testing.T) {
 	}
 	if _, ok := r.Options["embMethod"]; ok {
 		t.Errorf("llm mode should record no embMethod: %v", r.Options)
+	}
+	if _, ok := r.Options["embLayer"]; ok {
+		t.Errorf("llm mode should record no embLayer: %v", r.Options)
 	}
 }
 

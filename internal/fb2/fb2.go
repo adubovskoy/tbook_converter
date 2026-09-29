@@ -84,6 +84,7 @@ func Parse(path string) (*epub.Book, error) {
 
 	book := &epub.Book{}
 	book.Title, book.Author, book.Language, book.Cover = metadata(root)
+	book.Identifier = documentID(root)
 	if book.Title == "" {
 		book.Title = fb2ExtRE.ReplaceAllString(filepath.Base(path), "")
 	}
@@ -199,6 +200,24 @@ func buildDOM(data []byte) (*elem, error) {
 
 // metadata extracts title, author, language and cover bytes from
 // description/title-info and the referenced <binary>.
+// documentID returns <description><document-info><id>, the FB2 document's own
+// identifier; "" when absent.
+func documentID(root *elem) string {
+	desc := root.child("description")
+	if desc == nil {
+		return ""
+	}
+	di := desc.child("document-info")
+	if di == nil {
+		return ""
+	}
+	id := di.child("id")
+	if id == nil {
+		return ""
+	}
+	return strings.TrimSpace(id.text())
+}
+
 func metadata(root *elem) (title, author, lang string, cover []byte) {
 	desc := root.child("description")
 	if desc == nil {

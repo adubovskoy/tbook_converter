@@ -177,11 +177,80 @@ func (d *Dict) Supports(srcWord, tgt string) bool {
 	return false
 }
 
+// nearMaxEdits is how far a rendering may sit from a dictionary sense and still
+// read as a misspelling of it rather than a different word. Two: one dropped
+// letter plus one substitution covers the measured class («эскритуар» →
+// «эскртуар»), while a genuinely different rendering is nowhere near any sense.
+// nearMinLen keeps the check off short words, where two edits reach a quarter of
+// the word and any two words look alike.
+const (
+	nearMaxEdits = 2
+	nearMinLen   = 6
+)
+
+// NearMiss returns a dictionary rendering of srcWord within a couple of letters
+// of tgt without matching it — the signature of a typo in an enforced glossary
+// entry, which the pipeline otherwise protects from the proofreader
+// («escritoire → эскртуар» survived all 9 of its occurrences, 27 across a file
+// set). It answers false when tgt is plausible, when nothing is close, and when
+// either word is too short to judge.
+func (d *Dict) NearMiss(srcWord, tgt string) (string, bool) {
+	tf := fold(tgt)
+	if len([]rune(tf)) < nearMinLen || d.Supports(srcWord, tgt) {
+		return "", false
+	}
+	w := fold(srcWord)
+	best, bestDist := "", nearMaxEdits+1
+	for _, k := range append([]string{w}, stemVariants(w)...) {
+		for _, cand := range d.m[k] {
+			if len([]rune(cand)) < nearMinLen {
+				continue
+			}
+			if dist := editDistance(cand, tf, nearMaxEdits); dist > 0 && dist < bestDist {
+				best, bestDist = cand, dist
+			}
+		}
+	}
+	return best, best != ""
+}
+
+// editDistance is Levenshtein, bounded: it gives up with max+1 as soon as a
+// whole row exceeds max, so scanning a long sense list costs nothing.
+func editDistance(a, b string, maxEdits int) int {
+	ra, rb := []rune(a), []rune(b)
+	if len(ra)-len(rb) > maxEdits || len(rb)-len(ra) > maxEdits {
+		return maxEdits + 1
+	}
+	prev := make([]int, len(rb)+1)
+	cur := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur[0] = i
+		best := cur[0]
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, min(cur[j-1]+1, prev[j-1]+cost))
+			best = min(best, cur[j])
+		}
+		if best > maxEdits {
+			return maxEdits + 1
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(rb)]
+}
+
 // Result is the static verdict for one sentence.
 type Result struct {
-	Covered   int    // pairs whose source word the dictionary knows
-	Supported int    // of those, pairs that are dictionary-plausible
-	ShiftHits int    // pairs implausible for their word but plausible for a neighbor
+	Scored    int // pairs worth scoring at all (real word, non-empty w)
+	Covered   int // pairs whose source word the dictionary knows
+	Supported int // of those, pairs that are dictionary-plausible
+	ShiftHits int // pairs implausible for their word but plausible for a neighbor
 	Flagged   bool
 	Reason    string // "low-support" | "shift-pattern" | ""
 }
@@ -226,6 +295,7 @@ func (d *Dict) CheckSentence(s *tbook.Sentence, target string) Result {
 		if len([]rune(fold(frag))) < 3 {
 			continue // function words / punctuation: too noisy to score
 		}
+		res.Scored++
 
 		anyCovered, supported := false, false
 		for _, wi := range c.W {

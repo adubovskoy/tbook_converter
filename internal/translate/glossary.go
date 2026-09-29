@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/dimando/reader/converter/internal/cache"
 	"github.com/dimando/reader/converter/internal/jsonx"
@@ -33,6 +34,13 @@ type GlossEntry struct {
 	// Kind is "person" | "place" | "org" | "thing"; only "person" may carry a
 	// gender.
 	Kind string `json:"kind,omitempty"`
+	// Suspect holds the near spelling the target lexicon does know, for an
+	// entry whose own rendering it does not — the `escritoire → эскртуар`
+	// class. The entry is still enforced (consistency is the point, and the
+	// lexicon is not the authority on a book's terms) but it loses the
+	// proofreader's "never change this" protection, so the repair pass may fix
+	// the word instead of being told to keep it. Nothing rewrites it silently.
+	Suspect string `json:"suspect,omitempty"`
 }
 
 // glossarySampleMax caps how many sentences are sent to the model when
@@ -43,16 +51,35 @@ type GlossEntry struct {
 // why complete coverage comes from local mining instead (glossmine.go).
 const glossarySampleMax = 200
 
-// glossarySampleCap is how many entries the sample pass may return, and
-// defaultGlossaryMax how many the merged glossary keeps. 300 is 1.5x the
-// measured demand of a 15k-sentence novel (~200 terms) and far below anything
-// that costs adherence: 244 and 1392 entries both score 98.6%, and 1148
-// irrelevant entries around the real ones change nothing. What it does cost is
-// ~9 prompt tokens per entry on every batch of every pass that carries the
-// glossary.
+// glossarySampleCap is how many entries the sample pass may return in TOTAL,
+// glossarySampleChunks how many calls it is split over, and
+// glossaryChunkCap how many entries one call may return.
+// defaultGlossaryMax is how many the merged glossary keeps.
+//
+// The split is not about prompt size, it is about the entry cap being the only
+// number this pass's model actually obeys — and only while it is small.
+// Measured on deepseek-ai/DeepSeek-V4-Flash-0731 over Sherlock ch.1-2
+// (bench-quality/reports/b1-langgate-2026-09-19.md §9):
+//
+//	200 sentences, cap 120 → ran past the cap to 250+ entries and was CUT
+//	                          (finish_reason=length), degenerating into ordinary
+//	                          vocabulary — "police", "kingdom", "monarch"
+//	100 sentences, cap  30 → 30 entries, 1.1 kB, 4 s
+//	 50 sentences, cap  30 → 30 entries, 1.5 kB, 3 s
+//	 50 sentences, cap  40 → 20 entries (it ran out of terms first), 0.8 kB, 2 s
+//
+// So four calls of 50 sentences at 30 entries each cover the same sample, stay
+// inside the budget with room to spare, and can still return the full 120 —
+// against 0 for the single call that overruns. 300 for the merged glossary is
+// unchanged: 1.5x the measured demand of a 15k-sentence novel (~200 terms) and
+// far below anything that costs adherence (244 and 1392 entries both score
+// 98.6%). What a big glossary does cost is ~9 prompt tokens per entry on every
+// batch of every pass that carries it.
 const (
-	glossarySampleCap  = 120
-	defaultGlossaryMax = 300
+	glossarySampleCap    = 120
+	glossarySampleChunks = 4
+	glossaryChunkCap     = glossarySampleCap / glossarySampleChunks
+	defaultGlossaryMax   = 300
 )
 
 // GlossaryBuild carries everything BuildGlossary needs beyond the sentences.
@@ -114,16 +141,30 @@ func BuildGlossary(ctx context.Context, c *Client, sentences []*tbook.Sentence,
 		return entries, GlossHash(entries), nil
 	}
 
+	// Neither pass is a dependency of the other, and neither is worth a whole
+	// book: the glossary is an improvement over no glossary. The sample pass
+	// asks for up to glossarySampleCap entries in one reply, which is the
+	// largest single output the pipeline ever requests — on
+	// deepseek-ai/DeepSeek-V4-Flash-0731 it comes back finish_reason=length,
+	// and because the gonka gateway answers an identical request from cache
+	// every retry returns the same truncated reply in ~90 ms. Aborting there
+	// would make the shipped gonka default unable to convert any book at all.
 	sample, sampleErr := buildSampleGlossary(ctx, c, sentences, o)
 	if sampleErr != nil {
-		return nil, "", sampleErr
+		fmt.Printf("Glossary [%s]: sampled pass failed (%v) — mined terms only\n",
+			o.Target, sampleErr)
+	}
+	if sampleErr == nil {
+		fmt.Printf("Glossary [%s]: sampled %d terms over %d calls\n",
+			o.Target, len(sample), min(glossarySampleChunks, len(sentences)))
 	}
 	mined, minedErr := buildMinedGlossary(ctx, c, sentences, o)
 	if minedErr != nil {
-		// Mining is an improvement, not a dependency: a failed render call must
-		// not cost the book its glossary, so fall back to the sample pass.
 		fmt.Printf("Glossary [%s]: mined pass failed (%v) — using the sampled terms only\n",
 			o.Target, minedErr)
+	}
+	if sampleErr != nil && minedErr != nil {
+		return nil, "", fmt.Errorf("both glossary passes failed: sample: %w; mined: %v", sampleErr, minedErr)
 	}
 	entries = mergeGlossaries(sample, mined, o)
 
@@ -148,19 +189,116 @@ func (o GlossaryBuild) max() int {
 	return defaultGlossaryMax
 }
 
-// buildSampleGlossary is the original pass: one call over an even sample of the
-// book. Its unique contribution is ordinary words used in a book-specific sense.
-func buildSampleGlossary(ctx context.Context, c *Client, sentences []*tbook.Sentence,
-	o GlossaryBuild) ([]GlossEntry, error) {
-
+// evenSample spreads up to glossarySampleMax source sentences over the book.
+func evenSample(sentences []*tbook.Sentence) []string {
 	step := max(1, len(sentences)/glossarySampleMax)
-	var sample []string
+	sample := make([]string, 0, glossarySampleMax)
 	for i := 0; i < len(sentences); i += step {
 		sample = append(sample, sentences[i].Src)
 		if len(sample) >= glossarySampleMax {
 			break
 		}
 	}
+	return sample
+}
+
+// sampleChunks splits the even sample into glossarySampleChunks slices, each
+// still spread across the whole book: chunk k takes every Nth sentence starting
+// at k, so one call never sees only chapter one. A chunk that would be empty is
+// not sent.
+func sampleChunks(sample []string) [][]string {
+	n := min(glossarySampleChunks, len(sample))
+	if n <= 1 {
+		if len(sample) == 0 {
+			return nil
+		}
+		return [][]string{sample}
+	}
+	out := make([][]string, n)
+	for i, s := range sample {
+		out[i%n] = append(out[i%n], s)
+	}
+	return out
+}
+
+// buildSampleGlossary asks the model for the key terms of an even sample of the
+// book — the one thing that finds ordinary words used in a book-specific sense
+// ("stack", "hull"), which mining cannot.
+//
+// It is SPLIT over glossarySampleChunks calls, merged and de-duplicated by head
+// term. One call over the whole sample asks for so many entries that this
+// pass's model runs past the cap and is cut mid-reply; see glossaryChunkCap for
+// the measurement. Chunks run concurrently and tolerate each other's failures:
+// a partial sample is worth far more than none. Returns an error only when
+// EVERY chunk failed, and never returns the content of a truncated reply.
+func buildSampleGlossary(ctx context.Context, c *Client, sentences []*tbook.Sentence,
+	o GlossaryBuild) ([]GlossEntry, error) {
+
+	chunks := sampleChunks(evenSample(sentences))
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+	sys := glossarySystemPrompt(LangName(o.Source), LangName(o.Target), glossaryChunkCap)
+
+	var (
+		mu      sync.Mutex
+		perCall = make([][]GlossEntry, len(chunks))
+		failed  int
+		firstEr error
+		wg      sync.WaitGroup
+	)
+	for i, chunk := range chunks {
+		wg.Add(1)
+		go func(i int, chunk []string) {
+			defer wg.Done()
+			entries, err := sampleGlossaryCall(ctx, c, sys, chunk, o)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				failed++
+				if firstEr == nil {
+					firstEr = err
+				}
+				return
+			}
+			perCall[i] = entries
+		}(i, chunk)
+	}
+	wg.Wait()
+
+	if failed == len(chunks) {
+		return nil, fmt.Errorf("all %d sample calls failed: %w", len(chunks), firstEr)
+	}
+	if failed > 0 {
+		fmt.Printf("Glossary [%s]: %d of %d sample calls failed (%v) — keeping the rest\n",
+			o.Target, failed, len(chunks), firstEr)
+	}
+
+	// Merge in call order so the result does not depend on which goroutine won.
+	seen := make(map[string]bool, glossarySampleCap)
+	merged := make([]GlossEntry, 0, glossarySampleCap)
+	for _, entries := range perCall {
+		for _, e := range entries {
+			k := strings.ToLower(e.Src)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			merged = append(merged, e)
+			if len(merged) >= glossarySampleCap {
+				return merged, nil
+			}
+		}
+	}
+	return merged, nil
+}
+
+// sampleGlossaryCall is one chunk's request. A truncated reply never reaches
+// here: the client turns finish_reason=length into an error before parsing, so
+// a cut-off list is a retried failure and never a silently accepted partial.
+func sampleGlossaryCall(ctx context.Context, c *Client, sys string, sample []string,
+	o GlossaryBuild) ([]GlossEntry, error) {
+
 	userJSON, err := jsonx.Marshal(map[string]any{
 		"title": o.Title, "author": o.Author, "sentences": sample,
 	})
@@ -170,7 +308,6 @@ func buildSampleGlossary(ctx context.Context, c *Client, sentences []*tbook.Sent
 	var out struct {
 		Glossary []GlossEntry `json:"glossary"`
 	}
-	sys := glossarySystemPrompt(LangName(o.Source), LangName(o.Target))
 	if err := c.ChatJSON(WithPhase(ctx, "glossary"), sys, string(userJSON), &out); err != nil {
 		return nil, err
 	}
@@ -181,8 +318,8 @@ func buildSampleGlossary(ctx context.Context, c *Client, sentences []*tbook.Sent
 			entries = append(entries, e)
 		}
 	}
-	if len(entries) > glossarySampleCap {
-		entries = entries[:glossarySampleCap]
+	if len(entries) > glossaryChunkCap {
+		entries = entries[:glossaryChunkCap]
 	}
 	return entries, nil
 }
@@ -195,10 +332,15 @@ func buildSampleGlossary(ctx context.Context, c *Client, sentences []*tbook.Sent
 func mergeGlossaries(sample, mined []GlossEntry, o GlossaryBuild) []GlossEntry {
 	seen := make(map[string]bool, len(sample)+len(mined))
 	kept := make([]GlossEntry, 0, len(sample)+len(mined))
+	var drops []GlossDrop
 	add := func(list []GlossEntry) {
 		for _, e := range list {
 			k := strings.ToLower(e.Src)
-			if seen[k] || !acceptGlossEntry(e, o.Source, o.Target) {
+			if seen[k] {
+				continue
+			}
+			if why := rejectGlossEntry(e, o.Source, o.Target); why != "" {
+				drops = append(drops, GlossDrop{Src: e.Src, Tgt: e.Tgt, Why: why})
 				continue
 			}
 			seen[k] = true
@@ -210,6 +352,7 @@ func mergeGlossaries(sample, mined []GlossEntry, o GlossaryBuild) []GlossEntry {
 	}
 	add(mined)
 	add(sample)
+	ReportGlossDrops(o.Target, drops)
 	// Deterministic, and short entries first so the cap keeps head terms over
 	// the phrases that survived.
 	sort.SliceStable(kept, func(i, j int) bool {
@@ -247,6 +390,11 @@ type GlossaryScope struct {
 type glossaryFile struct {
 	GlossaryScope
 	Terms []GlossEntry `json:"terms"`
+	// Suspect repeats the entries whose rendering the target lexicon does not
+	// know while it knows a near spelling, so a human sees them without reading
+	// every term. Regenerated on every write from Terms; editing it changes
+	// nothing — fix the term instead.
+	Suspect []GlossEntry `json:"suspect,omitempty"`
 }
 
 // ErrGlossaryScope reports a sidecar that belongs to a different book or
@@ -296,7 +444,8 @@ func WriteGlossaryFile(path string, scope GlossaryScope, entries []GlossEntry) e
 	if entries == nil {
 		entries = []GlossEntry{}
 	}
-	b, err := jsonx.MarshalIndent(glossaryFile{GlossaryScope: scope, Terms: entries}, "  ")
+	b, err := jsonx.MarshalIndent(glossaryFile{GlossaryScope: scope, Terms: entries,
+		Suspect: Suspects(entries)}, "  ")
 	if err != nil {
 		return err
 	}
@@ -331,7 +480,7 @@ func GlossHash(entries []GlossEntry) string {
 	return hex.EncodeToString(sum[:6])
 }
 
-func glossarySystemPrompt(sourceName, targetName string) string {
+func glossarySystemPrompt(sourceName, targetName string, entryCap int) string {
 	r := strings.NewReplacer("{SRC}", sourceName, "{TGT}", targetName)
 	return r.Replace(`You prepare a translation glossary for a book ({SRC} → {TGT}).
 
@@ -349,7 +498,7 @@ mind, a "sleeve" that is a body). Nothing else can find those.
 Give the HEAD TERM, never a phrase built around it: "Suntouch", not "Suntouch House";
 "stack", not "cortical stack storage". One entry per term, in its base form
 (nominative singular). A phrase whose head word is already an entry is not an entry.
-At most ` + strconv.Itoa(glossarySampleCap) + ` entries.
+At most ` + strconv.Itoa(entryCap) + ` entries.
 
 Reply with ONLY a JSON object: {"glossary":[{"src":"<{SRC} term>","tgt":"<{TGT} translation>"}, …]}.
 No code fences, no commentary.`)

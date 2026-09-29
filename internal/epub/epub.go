@@ -44,10 +44,13 @@ type Book struct {
 	Title    string
 	Author   string
 	Language string // dc:language metadata as declared (e.g. "en", "en-US"); "" if absent
-	Cover    []byte // nil if none
-	Chapters []segment.ParsedChapter
-	Images   map[string][]byte    // output entry name ("images/imgN.ext") → bytes
-	Notes    []segment.ParsedNote // in first-reference order
+	// Identifier is the source's own id (dc:identifier for EPUB, <id> for FB2);
+	// "" if absent. Recorded in a version-2 manifest.source.
+	Identifier string
+	Cover      []byte // nil if none
+	Chapters   []segment.ParsedChapter
+	Images     map[string][]byte    // output entry name ("images/imgN.ext") → bytes
+	Notes      []segment.ParsedNote // in first-reference order
 }
 
 // Options tunes parsing.
@@ -66,10 +69,11 @@ type container struct {
 
 type opf struct {
 	Metadata struct {
-		Title    []string `xml:"title"`    // dc:title
-		Creator  []string `xml:"creator"`  // dc:creator
-		Language []string `xml:"language"` // dc:language
-		Metas    []struct {
+		Title      []string `xml:"title"`      // dc:title
+		Creator    []string `xml:"creator"`    // dc:creator
+		Language   []string `xml:"language"`   // dc:language
+		Identifier []string `xml:"identifier"` // dc:identifier
+		Metas      []struct {
 			Name    string `xml:"name,attr"`
 			Content string `xml:"content,attr"`
 		} `xml:"meta"`
@@ -114,9 +118,9 @@ type tocEntry struct {
 
 // parser carries the walk state shared across spine documents.
 type parser struct {
-	files map[string]*zip.File
-	opts  Options
-	book  *Book
+	files  map[string]*zip.File
+	opts   Options
+	book   *Book
 	skipRE []*regexp.Regexp // compiled Options.SkipExtra
 
 	// Footnote markers: distinct targets in first-reference order.
@@ -165,10 +169,11 @@ func ParseOpts(epubPath string, opts Options) (*Book, error) {
 	}
 
 	book := &Book{
-		Title:    firstNonEmpty(pkg.Metadata.Title),
-		Author:   firstNonEmpty(pkg.Metadata.Creator),
-		Language: firstNonEmpty(pkg.Metadata.Language),
-		Cover:    extractCover(files, pkg, opfDir, hrefByID),
+		Title:      firstNonEmpty(pkg.Metadata.Title),
+		Author:     firstNonEmpty(pkg.Metadata.Creator),
+		Language:   firstNonEmpty(pkg.Metadata.Language),
+		Identifier: firstNonEmpty(pkg.Metadata.Identifier),
+		Cover:      extractCover(files, pkg, opfDir, hrefByID),
 	}
 	if book.Title == "" {
 		book.Title = strings.TrimSuffix(path.Base(epubPath), path.Ext(epubPath))

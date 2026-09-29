@@ -25,29 +25,80 @@ func LangName(code string) string {
 // A non-empty glossary is appended as enforced terminology so recurring terms
 // and proper nouns stay consistent across every batch of the book.
 func translateSystemPrompt(sourceName, targetName string, glossary []GlossEntry) string {
+	return translateSystemPromptOpts(sourceName, targetName, glossary, TrOpts{})
+}
+
+// TrOpts selects the translate-prompt variant. The zero value is the
+// production v5 prompt, byte for byte.
+type TrOpts struct {
+	// Expressions: some items carry "expr" tags from the expression pass, and
+	// the prompt says how to render them.
+	Expressions bool
+	// NoMirror drops the "prefer the rendering that MIRRORS the source" clause
+	// (A2 §8: DeepSeek follows it too literally).
+	NoMirror bool
+}
+
+// mirrorClause is the v5 tie-break toward source-mirroring renderings.
+const mirrorClause = `- Natural {TGT} comes first — but when two renderings are equally natural, prefer
+  the one that MIRRORS the source: give each content word an explicit {TGT}
+  counterpart, keep the source clause order, keep metaphors as images. Do not
+  paraphrase freely; split or merge clauses only where {TGT} grammar demands it.
+`
+
+const noMirrorClause = `- Natural {TGT} comes first. Do not paraphrase freely; split or merge clauses only
+  where {TGT} grammar demands it.
+`
+
+const exprInputLine = `Some sentences also carry "expr": the expressions in src whose meaning is not the sum
+of their words, each as {words, meaning} — words is the exact span of src, meaning a
+plain-{SRC} gloss of it.
+`
+
+const exprRule = `- EXPRESSIONS (the "expr" tags): render each tagged expression as the natural {TGT}
+  expression of the same meaning — a {TGT} idiom, set phrase or plain wording a {TGT}
+  author would use — NEVER word by word. The meaning is a hint, not text to insert.
+  Translate the whole expression: none of its words may be dropped or left untranslated.
+`
+
+// TranslateSystemPromptOpts is TranslateSystemPrompt for a prompt variant.
+func TranslateSystemPromptOpts(sourceName, targetName string, glossary []GlossEntry, o TrOpts) string {
+	return translateSystemPromptOpts(sourceName, targetName, glossary, o)
+}
+
+func translateSystemPromptOpts(sourceName, targetName string, glossary []GlossEntry, o TrOpts) string {
 	r := strings.NewReplacer("{SRC}", sourceName, "{TGT}", targetName)
+	mirror, exprIn, exprR := mirrorClause, "", ""
+	if o.NoMirror {
+		mirror = noMirrorClause
+	}
+	if o.Expressions {
+		exprIn, exprR = "\n"+exprInputLine, exprRule
+	}
 	base := r.Replace(`You translate {SRC} → {TGT} for a language-learning reader: the app shows your
 translation beside the original and highlights matching word pairs, so the reader
 constantly compares the two texts word by word.
 
 You receive a JSON array of sentences, each {id, src}.
-
+` + exprIn + `
 For EACH sentence, write a faithful, natural literary {TGT} translation of src:
 - Each sentence STANDS ALONE: translate exactly the content of its own src — never
   borrow, merge, or shift words or meaning from a neighboring sentence in the batch.
 - COMPLETE and EXACT: every meaning element of src appears in the translation — no
   dropped clause, modifier, or negation; nothing invented; numbers, names, and
   quoted speech preserved.
-- Natural {TGT} comes first — but when two renderings are equally natural, prefer
-  the one that MIRRORS the source: give each content word an explicit {TGT}
-  counterpart, keep the source clause order, keep metaphors as images. Do not
-  paraphrase freely; split or merge clauses only where {TGT} grammar demands it.
-- Match the source register and tone: slang stays slang, formal stays formal.
+` + mirror + exprR + `- Match the source register and tone: slang stays slang, formal stays formal.
 - Output PURE {TGT} — never leave {SRC} words in the translation.
 
 Reply with ONLY a single JSON object mapping each "id" (exact string) to its {TGT}
 translation as a STRING. No code fences, no commentary. Translate EVERY sentence.`)
 	return base + glossaryBlock(targetName, glossary)
+}
+
+// TranslateSystemPrompt exposes the pass-1 prompt to the benchmarks and probes
+// in cmd/, so they measure exactly what production sends.
+func TranslateSystemPrompt(sourceName, targetName string, glossary []GlossEntry) string {
+	return translateSystemPrompt(sourceName, targetName, glossary)
 }
 
 // glossaryBlock renders the enforced-terminology section shared by the translate
@@ -156,19 +207,31 @@ book. The one exception is a person the GLOSSARY below tags with a gender: that 
 supplied for the whole book, and tr must agree with it.`)
 	}
 	base += ` MOST ITEMS NEED NO CHANGE — then return tr exactly as given.`
-	if len(glossary) > 0 {
+	// A suspect entry — one whose rendering the target lexicon does not know
+	// while it does know a spelling a letter or two away — is left OUT of the
+	// protected list. That protection is what kept `escritoire → эскртуар` in
+	// all 9 of its occurrences: the prompt told the proofreader the typo was
+	// correct by decision. Withheld, the same pass fixes the word like any
+	// other malformed one, and nothing rewrites the glossary behind the user.
+	protected := make([]GlossEntry, 0, len(glossary))
+	for _, e := range glossary {
+		if e.Suspect == "" {
+			protected = append(protected, e)
+		}
+	}
+	if len(protected) > 0 {
 		var sb strings.Builder
 		sb.WriteString(base)
 		sb.WriteString("\n\nGLOSSARY — these ")
 		sb.WriteString(targetName)
 		sb.WriteString(" renderings are enforced across the whole book. They are CORRECT by\n")
 		sb.WriteString("decision, even where a different word looks more literal — never change them:\n")
-		if glossaryHasGender(glossary) {
+		if glossaryHasGender(protected) {
 			sb.WriteString("A [male] / [female] tag gives the gender of the person that term refers to. It is\n")
 			sb.WriteString("a FACT about the book, not a guess: where tr makes a verb, adjective, participle or\n")
 			sb.WriteString("pronoun agree with that person in the other gender, FIX it.\n")
 		}
-		for _, e := range glossary {
+		for _, e := range protected {
 			sb.WriteString("- ")
 			sb.WriteString(e.Src)
 			sb.WriteString(" → ")

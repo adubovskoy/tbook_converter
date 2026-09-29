@@ -3,6 +3,7 @@ package embalign
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -199,5 +200,50 @@ func TestLoadUnitsFile(t *testing.T) {
 	}
 	if u := lookup("Unknown sentence.", [][2]int{{0, 7}}); u != nil {
 		t.Errorf("sentence absent from file: units = %v, want nil", u)
+	}
+}
+
+// TestStartChildArgs pins the child command line: the method value is passed
+// through verbatim (no allowlist here — "itermax-guarded" needs no change),
+// and --src-lang appears only when SrcLang is set, so the default command line
+// is exactly what it was before the guard existed.
+func TestStartChildArgs(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	for _, tc := range []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"default", Options{}, "--serve --model sentence-transformers/LaBSE --layer 8 --methods itermax-silent-cc"},
+		{"argmax", Options{Method: "argmax"}, "--serve --model sentence-transformers/LaBSE --layer 8 --methods argmax"},
+		{"guarded", Options{Method: "itermax-guarded", SrcLang: "de"},
+			"--serve --model sentence-transformers/LaBSE --layer 8 --methods itermax-guarded --src-lang de"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			script := filepath.Join(dir, "stub.py")
+			argsFile := filepath.Join(dir, "args.txt")
+			stub := "#!/bin/sh\necho \"$@\" > " + argsFile + "\n" +
+				"echo '{\"ready\": true}'\nwhile read -r line; do echo '{\"pairs\": []}'; done\n"
+			if err := os.WriteFile(script, []byte(stub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			opts := tc.opts
+			opts.Python, opts.Script = "/bin/sh", script
+			a, err := Start(opts)
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			defer a.Close()
+			b, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(b)); got != tc.want {
+				t.Errorf("child args = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

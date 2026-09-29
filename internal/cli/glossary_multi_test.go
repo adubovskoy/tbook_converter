@@ -22,7 +22,7 @@ func TestResolveGlossariesIsPerTarget(t *testing.T) {
 		Out: out, Model: "test-model", Glossary: true,
 	}
 
-	got := resolveGlossaries(cfg, "Revelation Space", "Alastair Reynolds", 1575)
+	got := resolveGlossaries(cfg, "Revelation Space", "Alastair Reynolds", 1575, nil)
 	if len(got) != 3 {
 		t.Fatalf("resolved %d namespaces, want one per target", len(got))
 	}
@@ -62,7 +62,7 @@ func TestResolveGlossariesLoadsEachSidecarSeparately(t *testing.T) {
 		t.Fatalf("write sidecar: %v", err)
 	}
 
-	got := resolveGlossaries(cfg, "Oz", "Baum", 2143)
+	got := resolveGlossaries(cfg, "Oz", "Baum", 2143, nil)
 	ru, de := got[0], got[1]
 	if ru.needsBuild || len(ru.entries) != 1 || ru.entries[0].Tgt != "Страшила" {
 		t.Errorf("ru should come from the sidecar: %+v", ru)
@@ -89,7 +89,7 @@ func TestResolveGlossariesWithoutGlossary(t *testing.T) {
 		Source: "en", Targets: []string{"ru", "de"},
 		Out: filepath.Join(t.TempDir(), "book.tbook"), Model: "test-model",
 	}
-	for _, g := range resolveGlossaries(cfg, "Oz", "Baum", 10) {
+	for _, g := range resolveGlossaries(cfg, "Oz", "Baum", 10, nil) {
 		if g.needsBuild || len(g.entries) != 0 || g.cacheModel != cfg.Model {
 			t.Errorf("%s: unexpected namespace %+v", g.target, g)
 		}

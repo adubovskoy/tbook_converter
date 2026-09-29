@@ -14,6 +14,7 @@ import (
 	"github.com/dimando/reader/converter/internal/cache"
 	"github.com/dimando/reader/converter/internal/embalign"
 	"github.com/dimando/reader/converter/internal/jsonx"
+	"github.com/dimando/reader/converter/internal/langcheck"
 	"github.com/dimando/reader/converter/internal/lexcheck"
 	"github.com/dimando/reader/converter/internal/progress"
 	"github.com/dimando/reader/converter/internal/segment"
@@ -139,6 +140,22 @@ type Pipeline struct {
 	// events (--progress-file) alongside the human bars.
 	Progress *progress.Sink
 
+	// LangNudge puts the target-script guard's reminder in the prompt from the
+	// FIRST attempt, not only after a wrong-language reply. Set by the langcheck
+	// gate when it re-translates cells that already came back in the wrong
+	// language once: the gonka gateway answers an identical request from cache,
+	// so an unchanged prompt would buy the same wrong answer.
+	LangNudge bool
+
+	// Expressions (--expressions) runs the source-side expression pass before
+	// translating and hands each sentence's tags to the translate prompt.
+	// NoMirror (--no-mirror) drops the translate prompt's mirror-the-source
+	// clause. Both change the translation, so the caller must namespace the
+	// cache with TranslateVariant.
+	Expressions bool
+	NoMirror    bool
+	exprOf      map[string][]Expr // src → tags; set by prepareExpressions
+
 	mu          sync.Mutex
 	lastErr     error // most recent batch failure, for the leftovers warning
 	totalSents  int
@@ -148,6 +165,9 @@ type Pipeline struct {
 	errSents    int
 	progTarget  string // current target language, for progress events
 	progTotal   int    // current phase's item count, for progress events
+	// wrongLang counts, per target, the sentences the target-script guard
+	// refused to cache, with one verbatim example.
+	wrongLang map[string]*wrongLangNote
 }
 
 func (p *Pipeline) updateBarDescription(bar *progressbar.ProgressBar, name string) {
@@ -252,8 +272,9 @@ type item struct {
 // (No character offsets: the model echoes numbered source-word text; offsets
 // are computed locally by align.BuildTextAlign.)
 type translateInput struct {
-	ID  string `json:"id"`
-	Src string `json:"src"`
+	ID   string `json:"id"`
+	Src  string `json:"src"`
+	Expr []Expr `json:"expr,omitempty"` // --expressions tags, when the sentence has any
 }
 
 // repairInput carries the existing translation for the proofreader to fix,
@@ -344,6 +365,11 @@ func (p *Pipeline) textKey(src, target string) string {
 // translated from the source independently). Already-cached sentences are
 // skipped, so the run is resumable and adding a language only does the new one.
 func (p *Pipeline) Run(ctx context.Context, sentences []*tbook.Sentence, targets []string) error {
+	if p.Expressions && p.exprOf == nil {
+		if _, err := p.prepareExpressions(ctx, sentences); err != nil {
+			return err
+		}
+	}
 	for _, target := range targets {
 		if err := p.runTarget(ctx, sentences, target); err != nil {
 			return err
@@ -371,7 +397,8 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 	p.mu.Unlock()
 
 	if len(needTr) > 0 {
-		sys := translateSystemPrompt(LangName(p.Source), LangName(target), p.Glossary)
+		sys := translateSystemPromptOpts(LangName(p.Source), LangName(target), p.Glossary,
+			TrOpts{Expressions: p.Expressions, NoMirror: p.NoMirror})
 		t0 := time.Now()
 		if err := p.runPhase(ctx, sys, needTr, target, phaseTranslate); err != nil {
 			return err
@@ -404,9 +431,14 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 			// that failed all rounds) keeps its raw translation as its proofread
 			// text: shipping it unproofread is right, and freezing that decision
 			// keeps the align phase and every later run consistent.
-			frozen := p.freezeUnrepaired(needRp, target)
+			frozen, refused := p.freezeUnrepaired(needRp, target)
 			if frozen > 0 {
 				fmt.Printf("[%s] %d sentences kept their unproofread text\n", target, frozen)
+			}
+			if len(refused) > 0 {
+				fmt.Printf("[%s] %d sentences dropped their wrong-language raw text instead of freezing it\n",
+					target, len(refused))
+				p.noteWrongLang(target, refused, "", phaseRepair)
 			}
 		}
 	}
@@ -425,6 +457,7 @@ func (p *Pipeline) runTarget(ctx context.Context, sentences []*tbook.Sentence, t
 				target, len(needAl), el.Round(time.Second), float64(len(needAl))/el.Seconds())
 		}
 	}
+	p.reportWrongLang(target)
 	return nil
 }
 
@@ -665,9 +698,15 @@ func (p *Pipeline) doneKey(it item, target string, ph phase) string {
 // every sentence the repair phase did not produce, and returns how many. Without
 // it those sentences would have no text for the align pass and would be retried
 // as pending on every later run, forever.
-func (p *Pipeline) freezeUnrepaired(items []item, target string) int {
+//
+// It freezes a DECISION, so it must never freeze a wrong-language raw
+// translation: that text would then be proofread by definition and no later run
+// would retry it (the same shape as the 1118 sentences a 429 storm once froze
+// unproofread). A raw translation the target-script guard would have refused is
+// left unfrozen instead, and the sentence ships untranslated.
+func (p *Pipeline) freezeUnrepaired(items []item, target string) (frozen int, refused []string) {
 	raw, rp := p.rawModel(), p.repairModel()
-	frozen := 0
+	guard := p.langGuardOn(target)
 	for _, it := range items {
 		rpKey := cache.RepairKey(it.s.Src, p.Source, target, rp)
 		if _, ok := cache.Read(p.CacheDir, rpKey); ok {
@@ -677,11 +716,18 @@ func (p *Pipeline) freezeUnrepaired(items []item, target string) int {
 		if !ok || strings.TrimSpace(tr.Text) == "" {
 			continue // never translated either; the raw fallback reports it
 		}
+		if guard {
+			if wrong, _ := langcheck.WrongScript(it.s.Src, tr.Text, p.Source, target); wrong {
+				cache.Remove(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, raw))
+				refused = append(refused, it.s.Src)
+				continue
+			}
+		}
 		if err := cache.Write(p.CacheDir, rpKey, tr); err == nil {
 			frozen++
 		}
 	}
-	return frozen
+	return frozen, refused
 }
 
 // buildPrevContext returns the neighbour-context lookup for one target: for a
@@ -844,81 +890,11 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 		return batch[n-1], true
 	}
 
-	if ph == phaseTranslate {
-		inputs := make([]translateInput, len(batch))
-		for i, it := range batch {
-			inputs[i] = translateInput{ID: strconv.Itoa(i + 1), Src: it.s.Src}
-		}
-		userJSON, err := jsonx.Marshal(inputs)
-		if err != nil {
-			return nil
-		}
-		out, err := p.Client.TranslateText(ctx, system, string(userJSON))
-		if err != nil {
-			p.noteErr(err)
-			return abortOnly(err)
-		}
-		for id, text := range out {
-			it, ok := byID(id)
-			if !ok {
-				continue
-			}
-			if text = strings.TrimSpace(text); text == "" || suspiciousTranslation(text) {
-				continue // dropped/artifact output — retried next round
-			}
-			_ = cache.Write(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, p.rawModel()),
-				tbook.Translation{Text: text})
-			// The proofread text and the final aligned entry are both DERIVED
-			// from the raw translation just replaced — drop them or the later
-			// phases would skip the sentence and FillFromCache would keep serving
-			// the stale text (this is how escalated sentences used to ship with
-			// the old model's content).
-			if p.Repair {
-				cache.Remove(p.CacheDir, cache.RepairKey(it.s.Src, p.Source, target, p.repairModel()))
-			}
-			cache.Remove(p.CacheDir, it.key)
-		}
-		return nil
-	}
-
-	if ph == phaseRepair {
-		inputs := make([]repairInput, 0, len(batch))
-		for i, it := range batch {
-			raw, ok := cache.Read(p.CacheDir, cache.TrKey(it.s.Src, p.Source, target, p.rawModel()))
-			if !ok || strings.TrimSpace(raw.Text) == "" {
-				continue // nothing to proofread; freezeUnrepaired handles the gap
-			}
-			in := repairInput{ID: strconv.Itoa(i + 1), Src: it.s.Src, Tr: strings.TrimSpace(raw.Text)}
-			if p.prevOf != nil {
-				in.Prev = p.prevOf(it.s)
-			}
-			inputs = append(inputs, in)
-		}
-		if len(inputs) == 0 {
-			return nil
-		}
-		userJSON, err := jsonx.Marshal(inputs)
-		if err != nil {
-			return nil
-		}
-		out, err := p.Client.TranslateText(ctx, system, string(userJSON))
-		if err != nil {
-			p.noteErr(err)
-			return abortOnly(err)
-		}
-		for id, text := range out {
-			it, ok := byID(id)
-			if !ok {
-				continue
-			}
-			if text = strings.TrimSpace(text); text == "" || suspiciousTranslation(text) {
-				continue // dropped/artifact output — retried next round
-			}
-			_ = cache.Write(p.CacheDir, cache.RepairKey(it.s.Src, p.Source, target, p.repairModel()),
-				tbook.Translation{Text: text})
-			cache.Remove(p.CacheDir, it.key) // stale alignment of the pre-proofread text
-		}
-		return nil
+	// The text phases (translate, repair) run behind the target-script guard:
+	// a batch whose reply is not in the target language is re-queued with a
+	// nudge instead of being cached (see langguard.go).
+	if ph == phaseTranslate || ph == phaseRepair {
+		return p.textPhaseBatch(ctx, system, batch, target, ph, byID)
 	}
 
 	// align phase
@@ -964,6 +940,9 @@ func (p *Pipeline) doBatch(ctx context.Context, system string, batch []item, tar
 func abortOnly(err error) error {
 	if _, ok := errors.AsType[*UsageLimitError](err); ok {
 		return err
+	}
+	if _, ok := errors.AsType[*ModelNotFoundError](err); ok {
+		return err // a 404 fails every remaining batch identically
 	}
 	if ce, ok := errors.AsType[*cliError](err); ok && ce.perm {
 		return err

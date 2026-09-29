@@ -27,6 +27,7 @@ import (
 	"github.com/dimando/reader/converter/internal/segment"
 	"github.com/dimando/reader/converter/internal/stopwords"
 	"github.com/dimando/reader/converter/internal/tbook"
+	"github.com/dimando/reader/converter/internal/tbook/v2/migrate"
 )
 
 // regressDelta is the content-coverage change that counts a sentence as
@@ -50,11 +51,11 @@ func main() {
 }
 
 func run(pathA, pathB, tgt string, limit, worst int, dump string) error {
-	bookA, err := tbook.Read(pathA)
+	bookA, _, err := migrate.ReadBook(pathA)
 	if err != nil {
 		return fmt.Errorf("read A: %w", err)
 	}
-	bookB, err := tbook.Read(pathB)
+	bookB, _, err := migrate.ReadBook(pathB)
 	if err != nil {
 		return fmt.Errorf("read B: %w", err)
 	}

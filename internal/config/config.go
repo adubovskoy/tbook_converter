@@ -19,6 +19,11 @@ type Config struct {
 	Input string // positional EPUB path
 	Out   string
 
+	// Format is the .tbook format version to write: FormatV2 (default) or
+	// FormatV1. Version 2 is assembled from the same in-memory model at write
+	// time (internal/tbook/v2/migrate) and enriched with the run's gate state.
+	Format string
+
 	// Provider selects the LLM backend: "openrouter" (metered HTTP API,
 	// needs OPENROUTER_API_KEY), "gonka" (the proxy.gonka.gg gateway to the
 	// Gonka decentralized compute network — OpenAI-compatible, needs
@@ -81,6 +86,20 @@ type Config struct {
 	EscalateModel   string // with --judge/--lexcheck: redo flagged sentences with this stronger model, in place
 	Lexcheck        bool   // static dictionary-based drift check
 	LexiconDir      string // directory of compact lexicons (tools/fetch-lexicons.sh)
+	// LangcheckGate makes the wrong-language check a gate rather than a report:
+	// flagged cells are re-translated before anything else consumes them, and
+	// what still fails ships untranslated (v1) or badged wrongLang (v2).
+	// --langcheck-gate=false keeps the old report-only behaviour.
+	LangcheckGate bool
+	// Typography runs the deterministic punctuation pass (internal/typography)
+	// over ru/de/fr translations at assembly. On by default; --typography=false disables it.
+	Typography bool
+
+	// JudgeProvider / EscalateProvider run the judge / escalation on another
+	// backend than --provider (e.g. translate on gonka, judge on OpenRouter).
+	// Resolved to Provider when not given.
+	JudgeProvider    string
+	EscalateProvider string
 
 	// StatsPath, when set, appends one JSONL record per LLM request attempt
 	// (latency, status, tokens, cost, provider) for offline analysis.
@@ -99,12 +118,12 @@ type Config struct {
 	// hybrid default degrades to llm with a notice.
 	AlignMode         string
 	AlignModeExplicit bool
-	EmbPython string  // interpreter for tools/embalign.py ("" = auto: EMBALIGN_PYTHON, .venv-embalign, python3)
-	EmbScript string  // aligner script path
-	EmbModel  string  // HF encoder id
-	EmbLayer  int     // hidden layer for token embeddings
-	EmbMethod string  // argmax (precision-first) | itermax (recall-first)
-	EmbQMin   float64 // hybrid gate: coverage threshold below which the LLM re-aligns
+	EmbPython         string  // interpreter for tools/embalign.py ("" = auto: EMBALIGN_PYTHON, .venv-embalign, python3)
+	EmbScript         string  // aligner script path
+	EmbModel          string  // HF encoder id
+	EmbLayer          int     // hidden layer for token embeddings
+	EmbMethod         string  // argmax | itermax | itermax-guarded | itermax-silent | itermax-silent-cc
+	EmbQMin           float64 // hybrid gate: coverage threshold below which the LLM re-aligns
 
 	// UnitsFile is EXPERIMENTAL (research-only, empty in production): a probe
 	// JSON file ([{"src":…, "expr":…}]) naming known multi-word expressions,
@@ -113,6 +132,13 @@ type Config struct {
 	// the aligner child also has EMBALIGN_UNIT_GLUE set. See
 	// embalign.LoadUnitsFile.
 	UnitsFile string
+
+	// Expressions runs the source-side expression pass (idioms, phrasal verbs,
+	// fixed expressions) and feeds its tags to the translate prompt. NoMirror
+	// drops the translate prompt's mirror-the-source clause. Both are
+	// experimental, off by default, and namespace the translation cache.
+	Expressions bool
+	NoMirror    bool
 
 	// Invalidate, if set, names a file of source sentences whose cached
 	// translation+alignment should be cleared (verify/QA loop); the run then exits.
@@ -159,6 +185,7 @@ func Load(args []string) (*Config, error) {
 	limit := fs.Int("limit-chapters", 0, "only convert the first N chapters (0 = all)")
 	dryRun := fs.Bool("dry-run", false, "parse + segment only; no API calls, no output")
 	estimate := fs.Bool("estimate", false, "parse + segment only; print a single JSON object (title, author, detected language, chapters/sentences/words/chars) to stdout and exit — no API calls, no key needed")
+	format := fs.String("format", envOr("FORMAT", FormatV2), "output .tbook format version: v2 (default) | v1")
 	force := fs.Bool("force", false, "force re-translation, ignoring cached entries (overwrites cache)")
 	invalidate := fs.String("invalidate", "", "verify/QA loop: clear cached translation+alignment for the "+
 		"source sentences in FILE (JSON array of strings, or one per line), then exit")
@@ -182,11 +209,17 @@ func Load(args []string) (*Config, error) {
 	judgeModel := fs.String("judge-model", envOr("JUDGE_MODEL", ""), "model for the judge pass (default: same as --model; see README before pointing it at a stronger model)")
 	judgeScope := fs.String("judge-scope", envOr("JUDGE_SCOPE", "flagged"), "with --judge: flagged (default: only lexcheck-flagged + low-coverage sentences, plus a 5% calibration sample) | all (every sentence)")
 	judgeInvalidate := fs.Bool("judge-invalidate", false, "with --judge: immediately clear cache for flagged sentences so the next run redoes them")
+	judgeProvider := fs.String("judge-provider", envOr("JUDGE_PROVIDER", ""), "backend for the judge pass (default: --provider); needs --judge-model when it differs")
+	escalateProvider := fs.String("escalate-provider", envOr("ESCALATE_PROVIDER", ""), "backend for --escalate-model (default: --provider)")
 	escalateModel := fs.String("escalate-model", envOr("ESCALATE_MODEL", ""), "with --judge/--lexcheck: immediately redo flagged sentences with this stronger model (kept in the primary cache namespace)")
 	// Lexcheck is free (offline) and runs by default; --no-lexcheck opts out.
 	// --lexcheck is kept as an accepted no-op for backward compatibility.
 	_ = fs.Bool("lexcheck", true, "(default; deprecated) static lexicon drift check — on unless --no-lexcheck")
 	noLexcheck := fs.Bool("no-lexcheck", envBool("NO_LEXCHECK", false), "disable the default static lexicon drift check")
+	// The wrong-language check is free and offline, and it is the only gate
+	// that sees a fluent answer in the wrong language, so it gates by default;
+	// --langcheck-gate=false leaves it a report (for A/B measurement).
+	langcheckGate := fs.Bool("langcheck-gate", envBool("LANGCHECK_GATE", true), "re-translate wrong-language cells before lexcheck, the align gate and the judge see them (=false: report only)")
 
 	// The proofread pass costs one more LLM call per sentence, so it is on where
 	// tokens are free (gonka) and off where they are metered — see
@@ -195,6 +228,7 @@ func Load(args []string) (*Config, error) {
 	repair := fs.Bool("repair", envBool("REPAIR", false), "proofread each translation before aligning (default: on for gonka, off otherwise)")
 	noRepair := fs.Bool("no-repair", envBool("NO_REPAIR", false), "skip the proofread pass even on gonka")
 	repairContext := fs.Int("context", envInt("REPAIR_CONTEXT", 0), "with the proofread pass: send the N preceding sentences and their translations as read-only context, so it can fix a wrong gender or referent instead of being forbidden to touch it (0 = off; 2 = measured best, ~3x the proofread phase; 1 is WORSE than 0 — see README)")
+	typography := fs.Bool("typography", envBool("TYPOGRAPHY", true), "normalise quotation marks, dashes and punctuation spacing of ru/de/fr translations at assembly (source-mirrored quotes; letters never change); on by default, --typography=false disables")
 	lexiconDir := fs.String("lexicons", envOr("LEXICON_DIR", "lexicons"), "lexicon directory for the drift check")
 	alignMode := fs.String("align-mode", envOr("ALIGN_MODE", AlignHybrid),
 		"alignment pass: hybrid (default: local embedding aligner + LLM fallback for gated sentences) | emb (embedding aligner only) | llm (LLM align pass)")
@@ -202,10 +236,14 @@ func Load(args []string) (*Config, error) {
 	embScript := fs.String("embalign-script", envOr("EMBALIGN_SCRIPT", "tools/embalign.py"), "embedding aligner script")
 	embModel := fs.String("embalign-model", envOr("EMBALIGN_MODEL", "sentence-transformers/LaBSE"), "embedding aligner encoder (HF model id)")
 	embLayer := fs.Int("embalign-layer", envInt("EMBALIGN_LAYER", 8), "embedding aligner hidden layer")
-	embMethod := fs.String("embalign-method", envOr("EMBALIGN_METHOD", "argmax"), "embedding aligner matching: argmax (precision-first) | itermax (recall-first)")
+	embMethod := fs.String("embalign-method", envOr("EMBALIGN_METHOD", "itermax-silent-cc"), "embedding aligner matching: argmax (precision-first, the pre-2026-09 default) | itermax (recall-first) | itermax-guarded | itermax-silent (itermax pairs only for source words argmax left unaligned) | itermax-silent-cc (the same, content words only)")
 	embQ := fs.Float64("embalign-q", envFloat("EMBALIGN_Q", 0.7), "hybrid gate: alignment-coverage threshold below which the LLM align pass redoes the sentence")
 	unitsFile := fs.String("units-file", envOr("EMBALIGN_UNITS_FILE", ""),
 		"EXPERIMENTAL: probe JSON of known multi-word expressions whose source spans are sent to the embedding aligner (needs EMBALIGN_UNIT_GLUE in its env)")
+	expressions := fs.Bool("expressions", envBool("EXPRESSIONS", false),
+		"EXPERIMENTAL: tag idioms/phrasal verbs/fixed expressions in the source (one extra LLM pass per book) and tell the translate pass to render them by meaning")
+	noMirror := fs.Bool("no-mirror", envBool("TRANSLATE_NO_MIRROR", false),
+		"EXPERIMENTAL: drop the translate prompt's prefer-the-rendering-that-mirrors-the-source clause")
 	stats := fs.String("stats", envOr("STATS_PATH", ""), "append per-request metrics (latency, status, tokens, cost) as JSONL to this file")
 	progressFile := fs.String("progress-file", envOr("PROGRESS_FILE", ""), "append machine-readable NDJSON progress events (phase, done, total) to this file during conversion")
 	providerSort := fs.String("provider-sort", envOr("PROVIDER_SORT", ""), "OpenRouter provider routing: throughput (fastest tokens/sec) | latency | price (empty = default routing)")
@@ -259,6 +297,7 @@ func Load(args []string) (*Config, error) {
 		LimitChapters:   *limit,
 		DryRun:          *dryRun,
 		Estimate:        *estimate,
+		Format:          strings.ToLower(strings.TrimSpace(*format)),
 		Force:           *force,
 		Verbose:         verbose || verboseSh,
 		KeepMatter:      *keepMatter,
@@ -279,6 +318,8 @@ func Load(args []string) (*Config, error) {
 		ProgressFile:    *progressFile,
 		EscalateModel:   *escalateModel,
 		Lexcheck:        !*noLexcheck,
+		LangcheckGate:   *langcheckGate,
+		Typography:      *typography,
 		LexiconDir:      *lexiconDir,
 		AlignMode:       strings.ToLower(strings.TrimSpace(*alignMode)),
 		EmbPython:       *embPython,
@@ -288,30 +329,38 @@ func Load(args []string) (*Config, error) {
 		EmbMethod:       *embMethod,
 		EmbQMin:         *embQ,
 		UnitsFile:       *unitsFile,
+		Expressions:     *expressions,
+		NoMirror:        *noMirror,
 		Invalidate:      *invalidate,
 	}
-	if cfg.Provider == "llama.cpp" { // accept the project's own spelling
-		cfg.Provider = ProviderLlamaCpp
-	}
-	switch cfg.Provider {
-	case ProviderOpenRouter, ProviderGonka, ProviderClaude, ProviderOllama, ProviderLlamaCpp:
-	default:
+	cfg.JudgeProvider = normProvider(*judgeProvider)
+	cfg.EscalateProvider = normProvider(*escalateProvider)
+	cfg.Provider = normProvider(cfg.Provider)
+	if !knownProvider(cfg.Provider) {
 		return nil, fmt.Errorf("unknown --provider %q (want openrouter, gonka, claude, ollama or llamacpp)", cfg.Provider)
+	}
+	for _, p := range []*string{&cfg.JudgeProvider, &cfg.EscalateProvider} {
+		if *p == "" {
+			*p = cfg.Provider
+		} else if !knownProvider(*p) {
+			return nil, fmt.Errorf("unknown judge/escalate provider %q (want openrouter, gonka, claude, ollama or llamacpp)", *p)
+		}
+	}
+	// Another backend's model namespace is unrelated to --model, so there is
+	// nothing sensible to default the model to.
+	if cfg.JudgeProvider != cfg.Provider && cfg.JudgeModel == "" {
+		return nil, fmt.Errorf("--judge-provider %s needs --judge-model", cfg.JudgeProvider)
+	}
+	if cfg.EscalateProvider != cfg.Provider && cfg.EscalateModel == "" {
+		return nil, fmt.Errorf("--escalate-provider %s needs --escalate-model", cfg.EscalateProvider)
 	}
 	// Ollama and llama-server speak the OpenAI API locally and need no key
 	// (the *_API_KEY vars exist for llama-server's --api-key or a reverse
 	// proxy). The OPENROUTER_* endpoint/key from .env must not leak into
 	// them — nor into the Gonka gateway, which has its own key and endpoint.
 	switch cfg.Provider {
-	case ProviderGonka:
-		cfg.BaseURL = strings.TrimRight(envOr("GONKA_BASE_URL", "https://proxy.gonka.gg/v1"), "/")
-		cfg.APIKey = os.Getenv("GONKA_API_KEY")
-	case ProviderOllama:
-		cfg.BaseURL = strings.TrimRight(envOr("OLLAMA_BASE_URL", "http://localhost:11434/v1"), "/")
-		cfg.APIKey = os.Getenv("OLLAMA_API_KEY")
-	case ProviderLlamaCpp:
-		cfg.BaseURL = strings.TrimRight(envOr("LLAMACPP_BASE_URL", "http://localhost:8080/v1"), "/")
-		cfg.APIKey = os.Getenv("LLAMACPP_API_KEY")
+	case ProviderGonka, ProviderOllama, ProviderLlamaCpp:
+		cfg.BaseURL, cfg.APIKey = Endpoint(cfg.Provider)
 	}
 	if cfg.AlignMode != AlignLLM && cfg.AlignMode != AlignEmb && cfg.AlignMode != AlignHybrid {
 		return nil, fmt.Errorf("unknown --align-mode %q (want llm, emb or hybrid)", cfg.AlignMode)
@@ -337,6 +386,9 @@ func Load(args []string) (*Config, error) {
 			repairSet = true
 		}
 	})
+	if cfg.Format != FormatV1 && cfg.Format != FormatV2 {
+		return nil, fmt.Errorf("unknown --format %q (want v1 or v2)", cfg.Format)
+	}
 	if cfg.JudgeScope != JudgeScopeAll && cfg.JudgeScope != JudgeScopeFlagged {
 		return nil, fmt.Errorf("unknown --judge-scope %q (want all or flagged)", cfg.JudgeScope)
 	}
@@ -375,9 +427,13 @@ func Load(args []string) (*Config, error) {
 	// reasoning models with variable latency (MiniMax-M2 can't stop thinking);
 	// give all three a roomier default timeout (explicit REQUEST_TIMEOUT_SEC
 	// still wins).
-	if (cfg.Provider == ProviderClaude || cfg.Provider == ProviderGonka || local) &&
-		os.Getenv("REQUEST_TIMEOUT_SEC") == "" {
-		cfg.Timeout = 300 * time.Second
+	if os.Getenv("REQUEST_TIMEOUT_SEC") == "" {
+		switch {
+		case cfg.Provider == ProviderGonka:
+			cfg.Timeout = defaultGonkaTimeout
+		case cfg.Provider == ProviderClaude || local:
+			cfg.Timeout = 300 * time.Second
+		}
 	}
 	// A local server runs a few requests at once (OLLAMA_NUM_PARALLEL,
 	// llama-server -np; often 1-2) and queues the rest, which then share the
@@ -396,14 +452,18 @@ func Load(args []string) (*Config, error) {
 	// (reported by /models), and the global batch of 16 overflows that on
 	// verbose targets (German, Spanish): whole batches come back
 	// finish_reason=length and those sentences never fill. Halving the batch
-	// keeps a request's output under the cap. And a saturated network 429s even
-	// single requests, so a full book needs more retry headroom than the
-	// metered API's 4 to ride out transient rejections. Explicit flag/env wins.
+	// keeps a request's output under the cap, and 8 is also the largest batch
+	// that fits the gateway's 120 s router deadline on a non-reasoning model.
+	// Retries, concurrency and the request timeout follow the same probe — see
+	// their constants below. Explicit flag/env wins over every one of them.
 	if cfg.Provider == ProviderGonka && !batchSet {
 		cfg.BatchSize = defaultGonkaBatch
 	}
 	if cfg.Provider == ProviderGonka && !retriesSet {
 		cfg.MaxRetries = defaultGonkaRetries
+	}
+	if cfg.Provider == ProviderGonka && !concurrencySet {
+		cfg.Concurrency = defaultGonkaConcurrency
 	}
 	// The proofread pass is the one thing near-free tokens buy: on gonka it fixes
 	// agreement, non-words and calqued expressions on ~4% of a book's sentences
@@ -416,26 +476,22 @@ func Load(args []string) (*Config, error) {
 	// OpenRouter ids carry a vendor prefix ("google/…"); Claude model ids never
 	// do. Under the claude provider, drop such leftovers from .env rather than
 	// failing every judge/escalate call on an unknown model.
-	if cfg.Provider == ProviderClaude {
-		if strings.Contains(cfg.JudgeModel, "/") {
-			cfg.JudgeModel = ""
-		}
-		if strings.Contains(cfg.EscalateModel, "/") {
-			cfg.EscalateModel = ""
-		}
+	if cfg.JudgeProvider == ProviderClaude && strings.Contains(cfg.JudgeModel, "/") {
+		cfg.JudgeModel = ""
+	}
+	if cfg.EscalateProvider == ProviderClaude && strings.Contains(cfg.EscalateModel, "/") {
+		cfg.EscalateModel = ""
 	}
 	// Same hygiene for the local servers: Ollama ids are "name[:tag]" — a "/"
 	// appears only in registry pulls ("hf.co/org/model:Q4"), which always
 	// carry a ":tag" — and llama-server ignores the requested id entirely, so
 	// any judge/escalate override is the served model regardless. An id with
 	// "/" but no ":" is an OpenRouter leftover from .env.
-	if local {
-		if strings.Contains(cfg.JudgeModel, "/") && !strings.Contains(cfg.JudgeModel, ":") {
-			cfg.JudgeModel = ""
-		}
-		if strings.Contains(cfg.EscalateModel, "/") && !strings.Contains(cfg.EscalateModel, ":") {
-			cfg.EscalateModel = ""
-		}
+	if isLocal(cfg.JudgeProvider) && strings.Contains(cfg.JudgeModel, "/") && !strings.Contains(cfg.JudgeModel, ":") {
+		cfg.JudgeModel = ""
+	}
+	if isLocal(cfg.EscalateProvider) && strings.Contains(cfg.EscalateModel, "/") && !strings.Contains(cfg.EscalateModel, ":") {
+		cfg.EscalateModel = ""
 	}
 	// Default judge = translate model. Measured (see README): a stronger judge
 	// keeps full drift recall but flags 50-70% of sentences on style pedantry —
@@ -471,6 +527,38 @@ func Load(args []string) (*Config, error) {
 	return cfg, nil
 }
 
+// Endpoint returns the base URL and API key of an OpenAI-compatible provider,
+// each from its own env vars (OpenRouter for anything else).
+func Endpoint(provider string) (baseURL, apiKey string) {
+	switch provider {
+	case ProviderGonka:
+		return strings.TrimRight(envOr("GONKA_BASE_URL", "https://proxy.gonka.gg/v1"), "/"), os.Getenv("GONKA_API_KEY")
+	case ProviderOllama:
+		return strings.TrimRight(envOr("OLLAMA_BASE_URL", "http://localhost:11434/v1"), "/"), os.Getenv("OLLAMA_API_KEY")
+	case ProviderLlamaCpp:
+		return strings.TrimRight(envOr("LLAMACPP_BASE_URL", "http://localhost:8080/v1"), "/"), os.Getenv("LLAMACPP_API_KEY")
+	}
+	return strings.TrimRight(envOr("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"), "/"), os.Getenv("OPENROUTER_API_KEY")
+}
+
+func normProvider(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	if p == "llama.cpp" { // accept the project's own spelling
+		return ProviderLlamaCpp
+	}
+	return p
+}
+
+func knownProvider(p string) bool {
+	switch p {
+	case ProviderOpenRouter, ProviderGonka, ProviderClaude, ProviderOllama, ProviderLlamaCpp:
+		return true
+	}
+	return false
+}
+
+func isLocal(p string) bool { return p == ProviderOllama || p == ProviderLlamaCpp }
+
 // LLM backends (mirrored in internal/translate; kept as plain strings here to
 // avoid an import cycle risk — config is a leaf).
 const (
@@ -488,6 +576,12 @@ const (
 	AlignHybrid = "hybrid"
 )
 
+// Output format versions.
+const (
+	FormatV1 = "v1"
+	FormatV2 = "v2"
+)
+
 // Judge scopes.
 const (
 	JudgeScopeAll     = "all"     // judge every translated sentence
@@ -497,9 +591,17 @@ const (
 // Per-provider model defaults.
 const (
 	defaultOpenRouterModel = "google/gemini-3.1-flash-lite"
-	defaultGonkaModel      = "moonshotai/Kimi-K2.6" // honors thinking-off; MiniMax-M2.7 always reasons
-	defaultClaudeModel     = "claude-haiku-4-5"
-	defaultOllamaModel     = "translategemma:12b" // Gemma 3 translation fine-tune (ollama.com/library/translategemma)
+	// Served as of 2026-09-19, and the only id on the gateway that cleared the
+	// plan's bars (≥90% request success at ≥5 sent/s) in every probe cell; it
+	// does not reason at all, which is why its batches fit the gateway's 120 s
+	// router deadline. moonshotai/Kimi-K2.6 — the previous default, and the
+	// model every gonka quality number in the reports describes — has answered
+	// 404 model_not_found at every probe since 2026-09-17. Re-probe before a
+	// run: the served list changed twice inside one hour of probing
+	// (bench-quality/reports/gonka-models-2026-09-19.md).
+	defaultGonkaModel  = "deepseek-ai/DeepSeek-V4-Flash-0731"
+	defaultClaudeModel = "claude-haiku-4-5"
+	defaultOllamaModel = "translategemma:12b" // Gemma 3 translation fine-tune (ollama.com/library/translategemma)
 )
 
 // defaultLocalConcurrency and defaultLocalBatch replace the global defaults
@@ -513,7 +615,22 @@ const (
 	defaultLocalConcurrency = 2
 	defaultLocalBatch       = 4
 	defaultGonkaBatch       = 8
-	defaultGonkaRetries     = 8
+	// Three, not the eight sized for August's 429 storm: the gateway serves a
+	// non-reasoning model at a p90 of 21 s for a batch of 8 today, so a request
+	// that has not answered is parked, not slow, and eight consecutive waits buy
+	// nothing. Three with backoff covers the transient 429 and the ~8% NDJSON
+	// reply, both of which succeed on the next attempt — and they are the same
+	// three attempts the target-script guard spends on a wrong-language batch.
+	defaultGonkaRetries = 3
+	// The gateway enforces a SHARED concurrency budget (~111 requests across all
+	// its clients) and answers 429 when someone else fills it; 32 bought nothing
+	// measurable against 8 and only raised that risk.
+	defaultGonkaConcurrency = 8
+	// The edge router cuts every upstream request at ~120 s regardless, and at a
+	// p90 of 21 s anything past 60 s is a parked request cheaper to abandon and
+	// retry than to wait out — measured as the difference between 0.73 and 5.72
+	// sent/s end-to-end. REQUEST_TIMEOUT_SEC still wins.
+	defaultGonkaTimeout = 60 * time.Second
 )
 
 // trimBookExt strips a known book extension (case-insensitive) so the default

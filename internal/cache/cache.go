@@ -33,10 +33,14 @@ const PromptVersion = "v8"
 // glossary (and, through the glossary hash, re-translated the book), while a
 // change to the glossary prompt itself was not picked up at all. Bumping this
 // rebuilds glossaries and therefore re-translates; bump it deliberately.
+// g2 = g1 with the sample pass split over 4 calls at 30 entries each instead of
+// one call at 120: the cap is the only number the pass's model obeys, and only
+// while it is small — at 120 it ran to 250+ entries and was cut mid-reply, so
+// the pass returned nothing at all (b1-langgate-2026-09-19.md §9).
 // g1 = frequency-mined candidates + render pass with echoed terms + entry
 // gates + optional gender annotation (see bench-quality/reports/
 // glossary-scale-and-gender.md).
-const GlossPromptVersion = "g1"
+const GlossPromptVersion = "g2"
 
 // TrPromptVersion keys the TRANSLATE (pass 1) contract separately, so an
 // align-only contract change re-aligns the book without re-translating it.

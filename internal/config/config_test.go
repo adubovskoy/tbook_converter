@@ -251,20 +251,60 @@ func TestGonkaDefaults(t *testing.T) {
 	if cfg.Model != defaultGonkaModel {
 		t.Errorf("Model = %q, want %q", cfg.Model, defaultGonkaModel)
 	}
-	// Smaller batch (output cap) and more retries (transient 429s), but
-	// concurrency stays at the global default — gonka's 429s are network-wide,
-	// not fan-out driven.
+	// Batch, retries, concurrency and timeout all follow the served-model probe
+	// (bench-quality/reports/gonka-models-2026-09-19.md): the gateway's budget
+	// is shared, so 8 wide is as good as 32, and past 60 s a request is parked
+	// rather than slow.
 	if cfg.BatchSize != defaultGonkaBatch {
 		t.Errorf("BatchSize = %d, want %d", cfg.BatchSize, defaultGonkaBatch)
 	}
 	if cfg.MaxRetries != defaultGonkaRetries {
 		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, defaultGonkaRetries)
 	}
-	if cfg.Concurrency != 32 {
-		t.Errorf("Concurrency = %d, want 32 (unchanged)", cfg.Concurrency)
+	if cfg.Concurrency != defaultGonkaConcurrency {
+		t.Errorf("Concurrency = %d, want %d", cfg.Concurrency, defaultGonkaConcurrency)
 	}
-	if cfg.Timeout != 300*time.Second {
-		t.Errorf("Timeout = %v, want 300s", cfg.Timeout)
+	if cfg.Timeout != defaultGonkaTimeout {
+		t.Errorf("Timeout = %v, want %v", cfg.Timeout, defaultGonkaTimeout)
+	}
+}
+
+// The langcheck gate is on by default and --langcheck-gate=false keeps the old
+// report-only behaviour, for A/B measurement.
+func TestLangcheckGateDefault(t *testing.T) {
+	clearProviderEnv(t)
+	cfg, err := Load([]string{"book.epub"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.LangcheckGate {
+		t.Error("LangcheckGate = false, want the gate on by default")
+	}
+	off, err := Load([]string{"book.epub", "--langcheck-gate=false"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if off.LangcheckGate {
+		t.Error("--langcheck-gate=false did not turn the gate off")
+	}
+}
+
+func TestTypographyDefaultOn(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("TYPOGRAPHY", "")
+	cfg, err := Load([]string{"book.epub"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Typography {
+		t.Error("Typography = false, want on by default")
+	}
+	off, err := Load([]string{"book.epub", "--typography=false"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if off.Typography {
+		t.Error("--typography=false did not turn the pass off")
 	}
 }
 
@@ -278,6 +318,13 @@ func TestGonkaExplicitOverrides(t *testing.T) {
 	if cfg.BatchSize != 16 {
 		t.Errorf("flag --batch-size lost: got %d, want 16", cfg.BatchSize)
 	}
+	explicit, err := Load([]string{"book.epub", "--provider", "gonka", "--concurrency", "24"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if explicit.Concurrency != 24 {
+		t.Errorf("flag --concurrency lost to the gonka default: got %d, want 24", explicit.Concurrency)
+	}
 	if cfg.MaxRetries != 2 {
 		t.Errorf("flag --max-retries lost: got %d, want 2", cfg.MaxRetries)
 	}
@@ -288,5 +335,61 @@ func TestUnknownProviderError(t *testing.T) {
 	_, err := Load([]string{"book.epub", "--provider", "llamafile"})
 	if err == nil || !strings.Contains(err.Error(), "ollama") {
 		t.Fatalf("want an error listing ollama among providers, got %v", err)
+	}
+}
+
+func TestJudgeEscalateProviders(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("JUDGE_PROVIDER", "")
+	t.Setenv("ESCALATE_PROVIDER", "")
+	t.Setenv("GONKA_API_KEY", "gk")
+	t.Setenv("OPENROUTER_API_KEY", "ork")
+
+	cfg, err := Load([]string{"book.epub", "--provider", "gonka"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.JudgeProvider != ProviderGonka || cfg.EscalateProvider != ProviderGonka {
+		t.Errorf("default providers = %q/%q, want gonka", cfg.JudgeProvider, cfg.EscalateProvider)
+	}
+
+	cfg, err = Load([]string{"book.epub", "--provider", "gonka",
+		"--judge-provider", "OpenRouter", "--judge-model", "google/gemini-3.7-flash",
+		"--escalate-provider", "openrouter", "--escalate-model", "google/gemini-3.7-flash"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.JudgeProvider != ProviderOpenRouter || cfg.EscalateProvider != ProviderOpenRouter {
+		t.Errorf("providers = %q/%q, want openrouter", cfg.JudgeProvider, cfg.EscalateProvider)
+	}
+	if cfg.JudgeModel != "google/gemini-3.7-flash" || cfg.EscalateModel != "google/gemini-3.7-flash" {
+		t.Errorf("models = %q/%q", cfg.JudgeModel, cfg.EscalateModel)
+	}
+	if cfg.APIKey != "gk" || !strings.Contains(cfg.BaseURL, "gonka") {
+		t.Errorf("translate endpoint = %q (key %q), want gonka's", cfg.BaseURL, cfg.APIKey)
+	}
+	if u, k := Endpoint(cfg.JudgeProvider); k != "ork" || u != "https://openrouter.ai/api/v1" {
+		t.Errorf("judge endpoint = %q (key %q), want OpenRouter's", u, k)
+	}
+
+	// A vendor-prefixed id is an OpenRouter id: kept for an OpenRouter judge
+	// even though the translate provider is local.
+	cfg, err = Load([]string{"book.epub", "--provider", "ollama",
+		"--judge-provider", "openrouter", "--judge-model", "google/gemini-3.7-flash"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.JudgeModel != "google/gemini-3.7-flash" {
+		t.Errorf("JudgeModel = %q, dropped by the local-provider hygiene", cfg.JudgeModel)
+	}
+
+	for _, args := range [][]string{
+		{"book.epub", "--provider", "gonka", "--judge-provider", "openrouter"},
+		{"book.epub", "--provider", "gonka", "--escalate-provider", "openrouter"},
+		{"book.epub", "--judge-provider", "bogus", "--judge-model", "x"},
+	} {
+		if _, err := Load(args); err == nil {
+			t.Errorf("Load(%v) accepted", args)
+		}
 	}
 }

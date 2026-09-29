@@ -290,6 +290,18 @@ func VerdictFor(cacheDir, judgeModel, source, target string, s *tbook.Sentence) 
 	return readVerdict(cacheDir, key)
 }
 
+// SaveVerdict stores v under the key VerdictFor reads, so a caller that
+// obtained a verdict outside the judge pass can make it available to the
+// assembly step (and to a later resumed run).
+func SaveVerdict(cacheDir, judgeModel, source, target string, s *tbook.Sentence, v Verdict) error {
+	tr, ok := s.Tr[target]
+	if !ok || tr.Text == "" {
+		return fmt.Errorf("no %s translation to attach a verdict to", target)
+	}
+	key := judgeKey(judgeModel, source, target, s.Src, tr.Text, alignPairs(s, tr))
+	return writeVerdict(cacheDir, key, v)
+}
+
 // WriteFlagged writes the flagged source sentences as a JSON array — the exact
 // format --invalidate consumes.
 func WriteFlagged(path string, srcs []string) error {

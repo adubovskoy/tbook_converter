@@ -49,6 +49,13 @@ func metaRun(cfg *config.Config, targets []string, glossTerms int, at time.Time)
 		r.Models["repair"] = cfg.Model
 		r.Prompts["repair"] = cache.RepairPromptVersion
 	}
+	if v := translate.TranslateVariant(cfg.Expressions, cfg.NoMirror); v != "" {
+		r.Prompts["translate"] += v
+	}
+	if cfg.Expressions {
+		r.Models["expr"] = cfg.Model
+		r.Prompts["expr"] = translate.ExprPromptVersion
+	}
 	if cfg.Judge {
 		r.Models["judge"] = cfg.JudgeModel
 		r.Prompts["judge"] = translate.JudgeVersion
@@ -72,20 +79,40 @@ func metaRun(cfg *config.Config, targets []string, glossTerms int, at time.Time)
 		// term count belongs in the provenance even though the file does not.
 		opts["glossaryTerms"] = glossTerms
 	}
+	if cfg.Typography {
+		opts["typography"] = true
+	}
 	if cfg.AlignBatch > 0 {
 		opts["alignBatch"] = cfg.AlignBatch
 	}
 	if cfg.AlignMode != config.AlignLLM {
 		opts["embMethod"] = cfg.EmbMethod
+		// The encoder layer changes every pair the aligner produces, so a file
+		// aligned at layer 6 must not read as one aligned at the default 8.
+		if cfg.EmbLayer > 0 {
+			opts["embLayer"] = cfg.EmbLayer
+		}
 		if cfg.EmbQMin > 0 {
 			opts["embQMin"] = cfg.EmbQMin
 		}
 	}
 	if cfg.Judge {
 		opts["judgeScope"] = cfg.JudgeScope
+		if cfg.JudgeProvider != cfg.Provider {
+			opts["judgeProvider"] = cfg.JudgeProvider
+		}
+	}
+	if cfg.EscalateModel != "" && cfg.EscalateProvider != cfg.Provider {
+		opts["escalateProvider"] = cfg.EscalateProvider
 	}
 	if cfg.JSONMode {
 		opts["jsonMode"] = true
+	}
+	if cfg.Expressions {
+		opts["expressions"] = true
+	}
+	if cfg.NoMirror {
+		opts["noMirror"] = true
 	}
 	if cfg.KeepMatter {
 		opts["keepMatter"] = true

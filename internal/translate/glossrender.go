@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/dimando/reader/converter/internal/jsonx"
+	"github.com/dimando/reader/converter/internal/langcheck"
 	"github.com/dimando/reader/converter/internal/tbook"
 )
 
@@ -296,35 +297,39 @@ func acceptGender(term string, rep glossRenderReply, gender map[string]genderEvi
 	return ""
 }
 
-// acceptGlossEntry is the deterministic gate every entry passes before it is
-// enforced, whichever pass produced it. Each rule closes a measured failure:
+// rejectGlossEntry is the deterministic gate every entry passes before it is
+// enforced, whichever pass produced it. It returns the reason an entry is
+// dropped, or "" to keep it. Each rule closes a measured failure:
 //
 //   - an empty or self-equal rendering ("learnt → learnt") teaches the model to
 //     leave source words in the translation: Latin-script leakage into Russian
 //     rose from 1.5% of sentences to 3.2% on the back of five such entries;
 //   - a rendering with no letter of the target's own script is the same failure
 //     in its pure form ("JacSol → JacSol");
+//   - a rendering MOSTLY in a script the target does not write is that failure
+//     for a Latin target, which the rule above cannot see: an en→ru glossary
+//     enforced on German put «Айрин Адлер» into the German text and Cyrillic
+//     into 73% of its sentences;
 //   - a lowercase source term whose rendering is capitalised is the signature of
 //     a render-pass mix-up ("safeguard → Институт Сильвеста"), the residue the
 //     echo check does not catch. Skipped for targets that capitalise nouns.
-func acceptGlossEntry(e GlossEntry, source, target string) bool {
+func rejectGlossEntry(e GlossEntry, source, target string) string {
 	src, tgt := strings.TrimSpace(e.Src), strings.TrimSpace(e.Tgt)
-	if src == "" || tgt == "" || len(src) < 2 {
-		return false
+	switch {
+	case src == "" || tgt == "" || len(src) < 2:
+		return "empty or too short"
+	case strings.EqualFold(src, tgt):
+		return "rendering equals the source term"
+	case stopSet(source)[strings.ToLower(src)]:
+		return "source term is a function word"
+	case !hasTargetScript(tgt, target):
+		return "rendering carries no " + target + " script"
+	case langcheck.OutsideScript(tgt, target):
+		return "rendering is in a script " + target + " does not write"
+	case !capitalisesNouns(target) && isLowerFirst(src) && isUpperFirst(firstWord(tgt)):
+		return "lowercase term rendered as a proper noun"
 	}
-	if strings.EqualFold(src, tgt) {
-		return false
-	}
-	if stopSet(source)[strings.ToLower(src)] {
-		return false
-	}
-	if !hasTargetScript(tgt, target) {
-		return false
-	}
-	if !capitalisesNouns(target) && isLowerFirst(src) && isUpperFirst(firstWord(tgt)) {
-		return false
-	}
-	return true
+	return ""
 }
 
 func firstWord(s string) string {

@@ -42,6 +42,26 @@ const (
 	KindDuplicateTarget = "duplicate-target"
 )
 
+// Gating reports whether a kind is strong enough to act on — to throw a
+// translation away, or to badge the cell as being in the wrong language.
+//
+// Only two of the three are. A whole leaked sentence is caught 78-88% of the
+// time by foreign-script on four independent targets, at a 1.0-4.0%
+// false-positive rate on clean text, and a duplicate target is one answer
+// served for two languages by construction. `untranslated` has no measured
+// precision and a known failure shape: a sentence whose content is proper
+// nouns the target legitimately keeps reads as the source copied through.
+// Measured, verbatim, on Sherlock ch.1 en→de:
+//
+//	src  “Is Briony Lodge, Serpentine Avenue, St. John’s Wood.”
+//	de   „Ist Briony Lodge, Serpentine Avenue, St. John’s Wood.“
+//
+// That is correct German. Acting on it deletes a good translation, which is a
+// worse outcome than shipping a suspect one, so the kind stays a report.
+func Gating(kind string) bool {
+	return kind == KindForeignScript || kind == KindDuplicateTarget
+}
+
 // Flag is one suspect (sentence, target) pair.
 type Flag struct {
 	Target string   `json:"target"`
@@ -51,6 +71,10 @@ type Flag struct {
 	Words  []string `json:"words,omitempty"` // the offending words (foreign-script)
 	Share  float64  `json:"share,omitempty"` // share of letters that are foreign
 	Other  string   `json:"other,omitempty"` // the other target (duplicate-target)
+	// Lang is the language of the foreign script when the script identifies
+	// one (Han → zh); empty for scripts many languages share (Latin,
+	// Cyrillic), where naming one would be a guess.
+	Lang string `json:"lang,omitempty"`
 }
 
 // scripts a language is written in. A language absent from this table disables
@@ -161,7 +185,7 @@ func checkOne(src, text, source, target string, opts Options) (Flag, bool) {
 	}
 	if fw, share := foreignWords(src, text, source, target); len(fw) > 0 {
 		return Flag{Target: target, Kind: KindForeignScript, Src: src, Text: text,
-			Words: fw, Share: round3(share)}, true
+			Words: fw, Share: round3(share), Lang: dominantLang(fw)}, true
 	}
 	if len(srcWords) >= opts.untranslatedWords() && untranslated(srcWords, words(text), opts) {
 		return Flag{Target: target, Kind: KindUntranslated, Src: src, Text: text}, true
@@ -185,12 +209,7 @@ func foreignWords(src, text, source, target string) ([]string, float64) {
 	var foreign []string
 	foreignLetters, totalLetters := 0, 0
 	for _, w := range words(text) {
-		letters := 0
-		for _, r := range w {
-			if unicode.IsLetter(r) {
-				letters++
-			}
-		}
+		letters := countLetters(w)
 		totalLetters += letters
 		if inScripts(w, allowed) || quoted[w] {
 			continue
@@ -202,6 +221,130 @@ func foreignWords(src, text, source, target string) ([]string, float64) {
 		return nil, 0
 	}
 	return dedupe(foreign), float64(foreignLetters) / float64(totalLetters)
+}
+
+// WrongScriptShare is how much of a sentence must sit outside the target's own
+// scripts before the batch guard calls it wrong-language. A majority, so a
+// rendering that keeps a Latin brand or a formula inside Russian stays clean
+// while a whole sentence in another language does not.
+const WrongScriptShare = 0.5
+
+// WrongScript reports whether text is written in a script the TARGET language
+// does not use — the defect nothing else in the pipeline sees: a well-formed,
+// fully covered, q = 1.000 answer in the wrong language (a whole batch came
+// back in Chinese from an en→ru run; Cyrillic filled 73% of a German overlay).
+//
+// It differs from the foreign-script report signal in two ways, both because it
+// runs on a reply the pipeline can still throw away: the source's script is NOT
+// allowed (Latin inside Russian is a leak, not a quotation) and a majority, not
+// a single word, is required. Words that occur in the source sentence are still
+// exempt — an original that quotes another script is legitimately carried over.
+//
+// The second return names the language of the offending script when the script
+// identifies one; it is "" for Latin and Cyrillic, which many languages share.
+// An unknown target disables the check rather than guessing.
+func WrongScript(src, text, source, target string) (bool, string) {
+	tgt := langScripts[strings.ToLower(target)]
+	if len(tgt) == 0 {
+		return false, ""
+	}
+	quoted := map[string]bool{}
+	for _, w := range words(src) {
+		quoted[w] = true
+	}
+	var foreign []string
+	foreignLetters, totalLetters := 0, 0
+	for _, w := range words(text) {
+		letters := countLetters(w)
+		totalLetters += letters
+		if letters == 0 || quoted[w] || inScripts(w, tgt) {
+			continue
+		}
+		foreignLetters += letters
+		foreign = append(foreign, w)
+	}
+	if totalLetters == 0 || float64(foreignLetters)/float64(totalLetters) <= WrongScriptShare {
+		return false, ""
+	}
+	return true, dominantLang(foreign)
+}
+
+// OutsideScript reports whether the majority of text's letters sit outside the
+// scripts the target language writes — the glossary-entry form of the same
+// question, with no source sentence to exempt anything. It is what rejects a
+// Cyrillic rendering from a German glossary (`Айрин Адлер`), which the
+// "contains one target-script letter" rule cannot see for a Latin target.
+func OutsideScript(text, target string) bool {
+	tgt := langScripts[strings.ToLower(target)]
+	if len(tgt) == 0 {
+		return false
+	}
+	foreign, total := 0, 0
+	for _, w := range words(text) {
+		letters := countLetters(w)
+		total += letters
+		if letters > 0 && !inScripts(w, tgt) {
+			foreign += letters
+		}
+	}
+	return total > 0 && float64(foreign)/float64(total) > WrongScriptShare
+}
+
+// namedScripts is the script table the detector reports from, most specific
+// first. lang is the language a script identifies on its own; "" where several
+// languages share it and naming one would be a guess (spec §6.9).
+var namedScripts = []struct {
+	table *unicode.RangeTable
+	lang  string
+}{
+	{unicode.Hiragana, "ja"}, {unicode.Katakana, "ja"}, {unicode.Hangul, "ko"},
+	{unicode.Han, "zh"}, {unicode.Cyrillic, ""}, {unicode.Latin, ""},
+	{unicode.Greek, "el"}, {unicode.Hebrew, "he"}, {unicode.Arabic, ""},
+	{unicode.Devanagari, ""}, {unicode.Bengali, "bn"}, {unicode.Tamil, "ta"},
+	{unicode.Telugu, "te"}, {unicode.Thai, "th"}, {unicode.Armenian, "hy"},
+	{unicode.Georgian, "ka"},
+}
+
+// dominantLang names the language of the script most of these words are in.
+// Japanese wins over Chinese whenever a kana appears: kanji alone reads as Han.
+func dominantLang(ws []string) string {
+	counts := make([]int, len(namedScripts))
+	for _, w := range ws {
+		for _, r := range w {
+			if !unicode.IsLetter(r) {
+				continue
+			}
+			for i, s := range namedScripts {
+				if unicode.Is(s.table, r) {
+					counts[i]++
+					break
+				}
+			}
+		}
+	}
+	best := -1
+	for i, n := range counts {
+		if n > 0 && (best < 0 || n > counts[best]) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	if namedScripts[best].lang == "zh" && (counts[0] > 0 || counts[1] > 0) {
+		return "ja"
+	}
+	return namedScripts[best].lang
+}
+
+func countLetters(w string) int {
+	n := 0
+	for _, r := range w {
+		if unicode.IsLetter(r) {
+			n++
+		}
+	}
+	return n
 }
 
 // inScripts reports whether every letter of w belongs to one of the tables.

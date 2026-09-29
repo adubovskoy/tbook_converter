@@ -95,6 +95,11 @@ func runConvert(t *testing.T, baseURL string, args ...string) error {
 	return Run(args)
 }
 
+// maxGlossaryCalls is what one glossary build may cost: the sample pass is
+// split over up to four calls (see translate.glossaryChunkCap) plus at most one
+// mining render call.
+const maxGlossaryCalls = 5
+
 // opened records the sidecar paths --only-glossary handed to the editor.
 var opened []string
 
@@ -124,13 +129,16 @@ func TestOnlyGlossaryWritesAndStops(t *testing.T) {
 	out := filepath.Join(dir, "out.tbook")
 	fixtureTbook(t, in)
 
-	base, calls := mockLLM(t, translate.GlossEntry{Src: "Revelation Space", Tgt: "Пространство Откровения"})
+	base, calls := mockLLM(t, translate.GlossEntry{Src: "Revelation Space", Tgt: "Espacio Revelación"})
 	err := runConvert(t, base, in, "-o", out, "-t", "es", "--cache-dir", filepath.Join(dir, "cache"), "--only-glossary")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if calls.Load() != 1 {
-		t.Errorf("LLM calls = %d, want exactly 1 (the glossary)", calls.Load())
+	// The glossary pass and nothing else: its sample half is split over up to
+	// four calls, plus at most one mining render call. A translate or align
+	// pass would blow past that.
+	if n := calls.Load(); n < 1 || n > maxGlossaryCalls {
+		t.Errorf("LLM calls = %d, want 1..%d (the glossary pass only)", n, maxGlossaryCalls)
 	}
 	if _, err := os.Stat(out); !os.IsNotExist(err) {
 		t.Errorf("%s was written; --only-glossary must not translate or assemble", out)
@@ -142,7 +150,7 @@ func TestOnlyGlossaryWritesAndStops(t *testing.T) {
 	if scope != want || scope.Sentences == 0 {
 		t.Errorf("scope = %+v, want %+v with a non-zero sentence count", scope, want)
 	}
-	if len(terms) != 1 || terms[0].Tgt != "Пространство Откровения" {
+	if len(terms) != 1 || terms[0].Tgt != "Espacio Revelación" {
 		t.Errorf("terms = %+v, want the model's single entry", terms)
 	}
 	if len(opened) != 1 || opened[0] != path {
@@ -196,7 +204,7 @@ func TestOnlyGlossaryForceRebuilds(t *testing.T) {
 	fixtureTbook(t, in)
 	path := out + ".glossary.en-es.json"
 
-	base, _ := mockLLM(t, translate.GlossEntry{Src: "Sylveste", Tgt: "Силвест"})
+	base, _ := mockLLM(t, translate.GlossEntry{Src: "Sylveste", Tgt: "Silveste"})
 	args := []string{in, "-o", out, "-t", "es", "--cache-dir", filepath.Join(dir, "cache"), "--only-glossary"}
 	if err := runConvert(t, base, args...); err != nil {
 		t.Fatalf("first run: %v", err)
@@ -210,7 +218,7 @@ func TestOnlyGlossaryForceRebuilds(t *testing.T) {
 	if err := runConvert(t, base, append(args, "--force")...); err != nil {
 		t.Fatalf("force run: %v", err)
 	}
-	if _, terms := readSidecar(t, path); len(terms) != 1 || terms[0].Tgt != "Силвест" {
+	if _, terms := readSidecar(t, path); len(terms) != 1 || terms[0].Tgt != "Silveste" {
 		t.Errorf("terms = %+v, want the model's glossary restored", terms)
 	}
 }
@@ -232,8 +240,8 @@ func TestOnlyGlossaryPerLanguagePair(t *testing.T) {
 	if err := runConvert(t, frBase, in, "-t", "fr", "--cache-dir", cacheDir, "--only-glossary"); err != nil {
 		t.Fatalf("fr run: %v", err)
 	}
-	if frCalls.Load() != 1 {
-		t.Fatalf("fr LLM calls = %d, want 1: the es sidecar was reused for fr", frCalls.Load())
+	if n := frCalls.Load(); n < 1 || n > maxGlossaryCalls {
+		t.Fatalf("fr LLM calls = %d, want 1..%d: the es sidecar was reused for fr", n, maxGlossaryCalls)
 	}
 
 	if _, terms := readSidecar(t, in+".glossary.en-es.json"); terms[0].Tgt != "Silveste" {
@@ -265,8 +273,8 @@ func TestOnlyGlossaryRejectsForeignSidecar(t *testing.T) {
 		"--cache-dir", filepath.Join(dir, "cache"), "--only-glossary"); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("LLM calls = %d, want 1: the stale sidecar was reused", calls.Load())
+	if n := calls.Load(); n < 1 || n > maxGlossaryCalls {
+		t.Fatalf("LLM calls = %d, want 1..%d: the stale sidecar was reused", n, maxGlossaryCalls)
 	}
 	scope, terms := readSidecar(t, path)
 	if scope.Sentences == 1 || len(terms) != 1 || terms[0].Tgt != "Silveste" {

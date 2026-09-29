@@ -12,8 +12,8 @@ import (
 // and parse failures) for offline latency/cost analysis. Enabled by --stats.
 // Safe for concurrent use; a nil *Stats discards everything.
 type Stats struct {
-	mu sync.Mutex
-	f  *os.File
+	mu  sync.Mutex
+	f   *os.File
 	enc *json.Encoder
 }
 
