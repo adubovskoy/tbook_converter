@@ -211,46 +211,62 @@ func ParseOpts(epubPath string, opts Options) (*Book, error) {
 	// Walk spine docs in order, accumulating chapters. `current` persists across
 	// files (a chapter may continue into the next spine document). `skipping`
 	// suppresses everything from a skipped chapter start until the next start.
-	var current *segment.ParsedChapter
-	skipping := false
-	for _, ref := range pkg.Spine.Itemrefs {
-		name := hrefByID[ref.IDref]
-		if name == "" {
-			continue
-		}
-		if strings.HasSuffix(strings.ToLower(name), "cover.xhtml") {
-			continue
-		}
-		f := files[name]
-		if f == nil {
-			continue
-		}
-		if tocMode {
-			if title, ok := chapterStarts[name]; ok {
-				if current != nil {
-					book.Chapters = append(book.Chapters, *current)
-					current = nil
-				}
-				if p.skipDoc(name, title) {
-					skipping = true
-					continue
-				}
-				skipping = false
-				current = &segment.ParsedChapter{Title: title}
-			} else if skipping || p.skipDoc(name, "") {
+	walkSpine := func() {
+		var current *segment.ParsedChapter
+		skipping := false
+		for _, ref := range pkg.Spine.Itemrefs {
+			name := hrefByID[ref.IDref]
+			if name == "" {
 				continue
 			}
-		} else if p.skipDoc(name, "") {
-			continue
+			if strings.HasSuffix(strings.ToLower(name), "cover.xhtml") {
+				continue
+			}
+			f := files[name]
+			if f == nil {
+				continue
+			}
+			if tocMode {
+				if title, ok := chapterStarts[name]; ok {
+					if current != nil {
+						book.Chapters = append(book.Chapters, *current)
+						current = nil
+					}
+					if p.skipDoc(name, title) {
+						skipping = true
+						continue
+					}
+					skipping = false
+					current = &segment.ParsedChapter{Title: title}
+				} else if skipping || p.skipDoc(name, "") {
+					continue
+				}
+			} else if p.skipDoc(name, "") {
+				continue
+			}
+			content, err := readAll(f)
+			if err != nil {
+				continue
+			}
+			current = p.parseDoc(name, content, current, &book.Chapters, tocMode)
 		}
-		content, err := readAll(f)
-		if err != nil {
-			continue
+		if current != nil {
+			book.Chapters = append(book.Chapters, *current)
 		}
-		current = p.parseDoc(name, content, current, &book.Chapters, tocMode)
 	}
-	if current != nil {
-		book.Chapters = append(book.Chapters, *current)
+	walkSpine()
+	// No usable NCX and no heading divs to split on (e.g. an empty navMap over
+	// bare <p> files): every spine document becomes a chapter.
+	if len(book.Chapters) == 0 && !tocMode {
+		for _, ref := range pkg.Spine.Itemrefs {
+			if name := hrefByID[ref.IDref]; name != "" {
+				if _, ok := chapterStarts[name]; !ok {
+					chapterStarts[name] = ""
+				}
+			}
+		}
+		tocMode = true
+		walkSpine()
 	}
 
 	// Resolve footnote bodies from their target documents; drop markers whose

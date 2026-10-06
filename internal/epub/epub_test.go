@@ -2,6 +2,8 @@ package epub
 
 import (
 	"archive/zip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -278,5 +280,56 @@ func TestDedupTitleHeadings(t *testing.T) {
 	}
 	if ch.Paragraphs[0].Text != "PRIMERA SECCIÓN" {
 		t.Fatalf("first remaining = %q", ch.Paragraphs[0].Text)
+	}
+}
+
+// writeEPUB zips name→content pairs into a temp .epub and returns its path.
+func writeEPUB(t *testing.T, entries map[string]string) string {
+	t.Helper()
+	fp := filepath.Join(t.TempDir(), "book.epub")
+	f, err := os.Create(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	for name, body := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte(body))
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	return fp
+}
+
+// An empty NCX navMap over bare <span><p> files (FB2EPUB output) has no
+// chapter boundary at all; each spine document must become a chapter.
+func TestParseNoBoundariesFallsBackToSpineDocs(t *testing.T) {
+	doc := func(text string) string {
+		return `<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title/></head>` +
+			`<body><span><p class="empty-line"/><p class="p">` + text + `</p></span></body></html>`
+	}
+	fp := writeEPUB(t, map[string]string{
+		"META-INF/container.xml": `<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+		"OPS/content.opf": `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>T</dc:title></metadata>` +
+			`<manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/><item id="b" href="b.xhtml" media-type="application/xhtml+xml"/></manifest>` +
+			`<spine toc="ncx"><itemref idref="a"/><itemref idref="b"/></spine></package>`,
+		"OPS/toc.ncx": `<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><navMap></navMap></ncx>`,
+		"OPS/a.xhtml": doc("Les curieux événements se sont produits à Oran."),
+		"OPS/b.xhtml": doc("La cité elle-même est laide."),
+	})
+	book, err := Parse(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(book.Chapters) != 2 {
+		t.Fatalf("got %d chapters, want 2", len(book.Chapters))
+	}
+	if got := book.Chapters[1].Paragraphs[0].Text; got != "La cité elle-même est laide." {
+		t.Errorf("chapter 2 text = %q", got)
 	}
 }
