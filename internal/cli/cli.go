@@ -431,8 +431,7 @@ func convert(cfg *config.Config, runStart time.Time) error {
 				// aligner: degrade to the LLM align pass and say how to get the
 				// free one back.
 				fmt.Printf("Embedding aligner unavailable (%v)\n"+
-					"  — falling back to --align-mode llm for this run; "+
-					"run tools/embalign-setup.sh to enable the free local align pass.\n", err)
+					"  — falling back to --align-mode llm for this run.\n", err)
 				cfg.AlignMode = config.AlignLLM
 				pipe.AlignMode = config.AlignLLM
 			}

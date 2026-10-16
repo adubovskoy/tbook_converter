@@ -62,6 +62,10 @@ func (o *Options) fill() {
 	}
 }
 
+// SetupURL documents installing the aligner, including for release binaries
+// that ship without tools/.
+const SetupURL = "https://github.com/adubovskoy/tbook_converter#local-word-aligner"
+
 // DefaultPython resolves the aligner interpreter: $EMBALIGN_PYTHON, then the
 // local .venv-embalign (tools/embalign-setup.sh), then python3 from PATH.
 func DefaultPython() string {
@@ -144,15 +148,13 @@ func Start(opts Options) (*Aligner, error) {
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start embedding aligner (%s): %w — run tools/embalign-setup.sh "+
-			"or set EMBALIGN_PYTHON", opts.Python, err)
+		return nil, fmt.Errorf("start embedding aligner (%s): %w — see %s", opts.Python, err, SetupURL)
 	}
 	a := &Aligner{cmd: cmd, in: in, out: bufio.NewReaderSize(outPipe, maxLine)}
 	resp, err := a.readResponse()
 	if err != nil {
 		_ = a.Close()
-		return nil, fmt.Errorf("embedding aligner failed to start: %w — run tools/embalign-setup.sh "+
-			"or set EMBALIGN_PYTHON", err)
+		return nil, fmt.Errorf("embedding aligner failed to start: %w — see %s", err, SetupURL)
 	}
 	if !resp.Ready {
 		_ = a.Close()

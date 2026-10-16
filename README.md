@@ -5,6 +5,21 @@ for the Reader app: every sentence gets a translation **and word-level
 alignment**, so the app shows the full-sentence translation with the tapped
 word highlighted — fully offline.
 
+## Install
+
+Prebuilt binaries for Linux, macOS and Windows are on the
+[releases page](https://github.com/adubovskoy/tbook_converter/releases):
+
+- **`tbook-converter-*`** — the [desktop app](#desktop-app-gui), one binary per platform. It
+  embeds the CLI: `tbook-converter convert <args>`. On Linux it needs GTK4 and WebKitGTK 6.0
+  installed.
+- **`tbook-tools-*`** — `convert`, `tbook-validate` and `tbook-migrate` as static binaries
+  without GUI libraries, for headless machines.
+
+Release binaries work without the `tools/` scripts: alignment falls back to the LLM until the
+[local word aligner](#local-word-aligner) is set up, and the lexicon drift check is skipped until
+lexicons are fetched (`LEXICON_DIR`, or `--lexicons <dir>`; the desktop app fetches them itself).
+
 ## Quick start
 
 ```bash
@@ -57,6 +72,23 @@ A plain run does, in order:
 5. **Lexcheck** — free offline dictionary drift check; flags go to
    `<out>.lexflagged.json`.
 6. **Assemble + validate** — structure, offsets, and alignment coverage.
+
+### Local word aligner
+
+The free align pass is a Python sidecar (`tools/embalign.py`, LaBSE on CPU; the model downloads
+~1.8 GB on first use). From a checkout, `tools/embalign-setup.sh` creates `.venv-embalign`, which
+`convert` picks up when run from the repo root. Release binaries ship without `tools/`, so point
+them at a checkout explicitly (Linux/macOS):
+
+```bash
+git clone https://github.com/adubovskoy/tbook_converter && tbook_converter/tools/embalign-setup.sh
+export EMBALIGN_PYTHON=$PWD/tbook_converter/.venv-embalign/bin/python
+export EMBALIGN_SCRIPT=$PWD/tbook_converter/tools/embalign.py
+```
+
+On Windows create the venv by hand (`python -m venv`, then install `torch` from the CPU index plus
+`transformers numpy`, as the script does) and set the same two variables. Without the aligner, a
+run prints *Embedding aligner unavailable* and aligns with the LLM instead.
 
 Near-free alternative: `./convert book.epub --provider gonka` sends batches to
 the [Gonka](https://gonka.ai) decentralized compute network via the
@@ -582,7 +614,7 @@ resume from the shared cache. Settings and job history live in
 
 ```bash
 go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.15   # once; Linux also needs
-                                                                    # webkit2gtk + gtk3 dev headers
+                                                                    # GTK4 + WebKitGTK 6.0 dev headers
 make gui-dev        # hot-reload development shell
 make gui-build      # production binary → cmd/convert-gui/bin/tbook-converter
 make gui-package    # platform packages (AppImage/deb/rpm, .app, NSIS)
