@@ -5,11 +5,16 @@ name: Release
 #      `wails3 task common:update:build-assets` (propagates it into the Windows
 #      resources and the macOS Info.plist) and commit
 #   2. `git tag v<version> && git push origin v<version>`
-# The tag must match config.yml — the build job refuses to release otherwise.
-# The release is created as a draft; review the binaries and publish by hand.
+# The tag must match config.yml — the version job refuses to release otherwise.
+# The release is created as a draft; review the assets and publish by hand.
 #
-# A manual run (workflow_dispatch) builds the same three binaries and leaves
-# them as run artifacts without creating a release — use it to smoke-test.
+# A manual run (workflow_dispatch) builds the same assets and leaves them as
+# run artifacts without creating a release — use it to smoke-test.
+#
+# Assets per platform (linux-amd64, macos-universal, windows-amd64):
+#   tbook-converter-<v>-<platform>[.exe]   GUI binary (embeds the CLI)
+#   tbook-tools-<v>-<platform>.{tar.gz,zip} convert, tbook-validate, tbook-migrate
+# plus SHA256SUMS over all of them.
 
 on:
   push:
@@ -26,43 +31,35 @@ concurrency:
 env:
   # Keep in step with the wails/v3 version in go.mod.
   WAILS_VERSION: v3.0.0-beta.15
+  # Keep in step with the konoui/lipo version wails/v3 depends on.
+  LIPO_VERSION: v0.10.0
 
 jobs:
-  build:
-    name: ${{ matrix.asset }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            asset: linux-amd64
-            task: build
-            binary: tbook-converter
-          # macos-latest is arm64; lipo joins an amd64 build in so one binary
-          # covers Apple Silicon and Intel.
-          - os: macos-latest
-            asset: macos-universal
-            task: darwin:build:universal
-            binary: tbook-converter
-          - os: windows-latest
-            asset: windows-amd64.exe
-            task: build
-            binary: tbook-converter.exe
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Resolve version
         id: version
-        shell: bash
         run: |
           set -euo pipefail
-          declared=$(sed -n 's/^  version: "\(.*\)"$/\1/p' cmd/convert-gui/build/config.yml)
+          build=cmd/convert-gui/build
+          declared=$(sed -n 's/^  version: "\(.*\)"$/\1/p' "$build/config.yml")
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             version="${GITHUB_REF_NAME#v}"
             if [ "$version" != "$declared" ]; then
               echo "::error::tag ${GITHUB_REF_NAME} does not match config.yml version ${declared}" >&2
+              exit 1
+            fi
+            # The Windows resources embedded in the .exe come from
+            # update:build-assets, which must have run after the bump.
+            if ! grep -q "\"${version}\"" "$build/windows/info.json"; then
+              echo "::error::$build/windows/info.json does not carry version ${version}; run wails3 task common:update:build-assets" >&2
               exit 1
             fi
           else
@@ -70,6 +67,35 @@ jobs:
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Building version ${version}"
+
+  gui:
+    name: GUI ${{ matrix.platform }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-amd64
+            task: build
+            binary: tbook-converter
+          # macos-latest is arm64; lipo joins an amd64 build in so one binary
+          # covers Apple Silicon and Intel.
+          - os: macos-latest
+            platform: macos-universal
+            task: darwin:build:universal
+            binary: tbook-converter
+          - os: windows-latest
+            platform: windows-amd64
+            task: build
+            binary: tbook-converter.exe
+            ext: .exe
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
         with:
@@ -101,35 +127,101 @@ jobs:
 
       - name: Build GUI
         working-directory: cmd/convert-gui
-        run: wails3 task ${{ matrix.task }} VERSION=${{ steps.version.outputs.version }}
+        run: wails3 task ${{ matrix.task }} VERSION=${{ env.VERSION }}
 
       - name: Name the binary for release
         id: asset
         shell: bash
-        working-directory: cmd/convert-gui/bin
         run: |
           set -euo pipefail
-          name="tbook-converter-${{ steps.version.outputs.version }}-${{ matrix.asset }}"
-          mv "${{ matrix.binary }}" "$name"
+          name="tbook-converter-${VERSION}-${{ matrix.platform }}${{ matrix.ext }}"
+          mkdir -p dist
+          mv "cmd/convert-gui/bin/${{ matrix.binary }}" "dist/$name"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
-          ls -l "$name"
+          ls -l dist
 
       # Proves the binary starts and resolves its dynamic libraries; the
       # embedded CLI's usage needs neither a display nor an API key.
       - name: Smoke-test the binary
         shell: bash
-        working-directory: cmd/convert-gui/bin
-        run: ./${{ steps.asset.outputs.name }} convert --help > /dev/null
+        run: ./dist/${{ steps.asset.outputs.name }} convert --help > /dev/null
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.asset.outputs.name }}
-          path: cmd/convert-gui/bin/${{ steps.asset.outputs.name }}
+          name: gui-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  cli:
+    name: CLI tools
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Pure Go: no cgo outside cmd/convert-gui, so every target cross-compiles
+      # from here into a static binary.
+      - name: Build
+        run: |
+          set -euo pipefail
+          ldflags="-s -w -X github.com/dimando/reader/converter/internal/buildinfo.Version=${VERSION}"
+          build() { # goos goarch outdir
+            for cmd in convert tbook-validate tbook-migrate; do
+              ext=""; [ "$1" = windows ] && ext=.exe
+              CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags "$ldflags" \
+                -o "$3/$cmd$ext" "./cmd/$cmd"
+            done
+          }
+          build linux amd64 out/linux-amd64
+          build windows amd64 out/windows-amd64
+          build darwin amd64 out/darwin-amd64
+          build darwin arm64 out/darwin-arm64
+          mkdir -p out/macos-universal
+          for cmd in convert tbook-validate tbook-migrate; do
+            go run github.com/konoui/lipo@${LIPO_VERSION} -create \
+              -output "out/macos-universal/$cmd" \
+              "out/darwin-amd64/$cmd" "out/darwin-arm64/$cmd"
+          done
+
+      - name: Smoke-test the binaries
+        run: |
+          set -euo pipefail
+          for cmd in convert tbook-validate tbook-migrate; do
+            out/linux-amd64/$cmd --help > /dev/null 2>&1
+          done
+
+      - name: Collect assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for platform in linux-amd64 macos-universal windows-amd64; do
+            name="tbook-tools-${VERSION}-${platform}"
+            mkdir -p "stage/$name"
+            cp out/$platform/* README.md LICENSE "stage/$name/"
+            if [ "$platform" = windows-amd64 ]; then
+              (cd stage && zip -qr "../dist/$name.zip" "$name")
+            else
+              tar -C stage -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli
+          path: dist/*
           if-no-files-found: error
 
   release:
     name: Draft release
-    needs: build
+    needs: [gui, cli]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -143,6 +235,10 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS && cat SHA256SUMS
+
       - name: Draft the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -152,20 +248,29 @@ jobs:
           {
             echo "## Install"
             echo
-            echo "Desktop app for converting EPUB/FB2 books into \`.tbook\`. One binary per"
-            echo "platform; it also embeds the CLI (\`tbook-converter convert <args>\`)."
+            echo "**\`tbook-converter-*\`** — desktop app for converting EPUB/FB2 books into"
+            echo "\`.tbook\`. One binary per platform; it also embeds the CLI"
+            echo "(\`tbook-converter convert <args>\`)."
+            echo
+            echo "**\`tbook-tools-*\`** — \`convert\`, \`tbook-validate\`, \`tbook-migrate\` as static"
+            echo "binaries with no GUI libraries, for headless servers."
             echo
             echo '```bash'
             echo "# Linux / macOS"
             echo "chmod +x tbook-converter-*"
+            echo "sha256sum -c SHA256SUMS --ignore-missing"
             echo '```'
             echo
-            echo "The binaries are unsigned: macOS needs"
-            echo "\`xattr -d com.apple.quarantine tbook-converter-*\` and Windows shows a"
-            echo "SmartScreen warning on first run."
+            echo "### Notes"
             echo
-            echo "Linux needs GTK4 and WebKitGTK 6.0 installed (\`libgtk-4-1\`,"
-            echo "\`libwebkitgtk-6.0-4\` on Debian/Ubuntu; \`gtk4\`, \`webkitgtk6.0\` on Fedora)."
+            echo "- The binaries are unsigned: macOS needs"
+            echo "  \`xattr -d com.apple.quarantine tbook-converter-*\` and Windows shows a"
+            echo "  SmartScreen warning on first run."
+            echo "- The Linux desktop app needs GTK4 and WebKitGTK 6.0 installed (\`libgtk-4-1\`,"
+            echo "  \`libwebkitgtk-6.0-4\` on Debian/Ubuntu; \`gtk4\`, \`webkitgtk6.0\` on Fedora;"
+            echo "  \`gtk4\`, \`webkitgtk-6.0\` on Arch)."
+            echo "- Word alignment falls back to the LLM unless the free local aligner is"
+            echo "  set up — see [Local word aligner](https://github.com/${GITHUB_REPOSITORY}#local-word-aligner)."
             echo
           } > notes.md
           gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \

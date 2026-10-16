@@ -9,7 +9,7 @@ platform: "linux"
 version: "0.1.0"
 section: "default"
 priority: "extra"
-maintainer: ${GIT_COMMITTER_NAME} <${GIT_COMMITTER_EMAIL}>
+maintainer: "Alexander Dubovskoy <alex@techlovers.team>"
 description: "Convert EPUB/FB2 books into tap-to-translate .tbook files"
 vendor: "tbook"
 homepage: "https://github.com/adubovskoy/tbook_converter"
@@ -18,7 +18,7 @@ release: "1"
 
 contents:
   - src: "./bin/tbook-converter"
-    dst: "/usr/local/bin/tbook-converter"
+    dst: "/usr/bin/tbook-converter"
   - src: "./build/appicon.png"
     dst: "/usr/share/icons/hicolor/128x128/apps/tbook-converter.png"
   - src: "./build/linux/tbook-converter.desktop"
