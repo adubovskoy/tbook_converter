@@ -492,3 +492,26 @@ func TestAnnotateAndSkipped(t *testing.T) {
 		t.Fatalf("annotated file invalid: %v", rep.Violations)
 	}
 }
+
+func TestDigitPassthroughSkipsEscapedToken(t *testing.T) {
+	s := &tbook.Sentence{
+		Src:   "design 10",
+		Words: [][2]int{{0, 6}},
+		Tr: map[string]tbook.Translation{"ru": {
+			Text:  "проектирования».10",
+			Align: []tbook.AlignChunk{{T: [2]int{0, 18}, W: []int{0}}},
+		}},
+	}
+	b := &tbook.Book{Title: "T", Source: "en", Targets: []string{"ru"},
+		Chapters: []tbook.Chapter{{Title: "C", Paragraphs: [][]*tbook.Sentence{{s}}}}}
+	arc, stats, err := Convert(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.DigitPassthrough != 0 {
+		t.Errorf("digit inside an escape was linked: %d", stats.DigitPassthrough)
+	}
+	if rep, _ := v2.Validate(writeArchive(t, arc, "escaped-digit.tbook")); !rep.OK() {
+		t.Fatalf("invalid: %v", rep.Violations)
+	}
+}

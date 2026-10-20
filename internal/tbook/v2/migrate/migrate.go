@@ -370,6 +370,17 @@ func (c *converter) buildBlock(sents []*tbook.Sentence, langs []string, preset *
 
 var digitToken = regexp.MustCompile(`^\p{N}[\p{N}.,:]*$`)
 
+// insideEscape reports whether token t overlaps any escape chunk; linking it
+// would break §6.5.
+func insideEscape(t [2]int, escapes [][]int) bool {
+	for _, x := range escapes {
+		if t[0] < x[1] && x[0] < t[1] {
+			return true
+		}
+	}
+	return false
+}
+
 // translation maps one v1 translation to a v2 Translation (Annex A.3, A.4).
 func (c *converter) translation(s *tbook.Sentence, k int, lang string, ctx *blockCtx) *v2.Translation {
 	tr, ok := s.Tr[lang]
@@ -463,7 +474,7 @@ func (c *converter) translation(s *tbook.Sentence, k int, lang string, ctx *bloc
 				cand = j
 			}
 		}
-		if cand >= 0 && links[cand].IsNull() {
+		if cand >= 0 && links[cand].IsNull() && !insideEscape(toks[cand], escapes) {
 			links[cand] = v2.Single(i2)
 			c.stats.DigitPassthrough++
 		}
