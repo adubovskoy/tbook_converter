@@ -554,7 +554,7 @@ func NewSegmenter(lang string) sentencizer.Segmenter {
 	if !segmenterLangs[lang] {
 		lang = "en"
 	}
-	return sentencizer.NewSegmenter(lang)
+	return wordSafeSegmenter{sentencizer.NewSegmenter(lang)}
 }
 
 // buildSentences segments one paragraph's text into final sentence objects,
