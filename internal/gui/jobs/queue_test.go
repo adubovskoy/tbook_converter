@@ -254,15 +254,18 @@ func TestStartMarksStaleRunningInterrupted(t *testing.T) {
 
 func TestRemoveGuardsActive(t *testing.T) {
 	block := make(chan struct{})
-	defer close(block)
 	conv := &fakeConv{run: func(ctx context.Context, spec runner.ConvertSpec) (float64, error) {
 		<-block
 		return 0, nil
 	}}
-	m, _ := newTestManager(t, conv)
+	m, log := newTestManager(t, conv)
 	j, _ := m.Enqueue(testJob("a.epub"))
 	waitStatus(t, m, j.ID, StatusRunning)
-	if err := m.Remove(j.ID); err == nil {
+	err := m.Remove(j.ID)
+	// Let the job finish before TempDir cleanup, or its final store write races the removal.
+	close(block)
+	log.wait(t, j.ID, StatusDone)
+	if err == nil {
 		t.Fatal("Remove allowed on a running job")
 	}
 }
